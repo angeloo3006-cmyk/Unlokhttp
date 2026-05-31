@@ -1,31 +1,25 @@
 /**
- * sniffer_core — Tauri sidecar for packet capture
+ * ES: Sidecar de Tauri para capturar paquetes de red.
+ * EN: Tauri sidecar for network packet capture.
  *
- * Communication protocol:
- *   stdin  ← JSON commands (newline-delimited)
- *   stdout → JSON events  (newline-delimited)
- *
- * Build:
- *   Windows : cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build --config Release
- *   Linux   : cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build
+ * ES: stdin recibe comandos JSONL y stdout emite eventos JSONL.
+ * EN: stdin receives JSONL commands and stdout emits JSONL events.
  */
 
-// ────────────────────────────────────────────────────────────────────────────
-// Platform detection & pcap headers
-// ────────────────────────────────────────────────────────────────────────────
+// ES: Deteccion de plataforma y cabeceras pcap. / EN: Platform detection and pcap headers.
 #ifdef _WIN32
 #  define WIN32_LEAN_AND_MEAN
 #  define NOMINMAX
 #  include <windows.h>
 #  include <fcntl.h>
 #  include <io.h>
-   // Npcap SDK ships the same pcap.h interface
+   // ES: El SDK de Npcap expone la misma interfaz pcap.h. / EN: The Npcap SDK exposes the same pcap.h interface.
 #  include <pcap/pcap.h>
 #  ifdef _MSC_VER
 #    pragma comment(lib, "wpcap.lib")
 #    pragma comment(lib, "ws2_32.lib")
 #  endif
-   // inet_ntop / ntohs shim for older MSVC
+   // ES: Compatibilidad para inet_ntop y ntohs en versiones antiguas de MSVC. / EN: Compatibility for inet_ntop and ntohs on older MSVC versions.
 #  include <ws2tcpip.h>
 #  ifndef INET_ADDRSTRLEN
 #    define INET_ADDRSTRLEN 16
@@ -37,9 +31,7 @@
 #  include <sys/socket.h>
 #endif
 
-// ────────────────────────────────────────────────────────────────────────────
-// Standard headers
-// ────────────────────────────────────────────────────────────────────────────
+// ES: Cabeceras estandar. / EN: Standard headers.
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -53,25 +45,23 @@
 #include <thread>
 #include <vector>
 
-// nlohmann/json — single-header, placed next to main.cpp
+// ES: nlohmann/json usa una sola cabecera ubicada junto a main.cpp. / EN: nlohmann/json uses one header placed next to main.cpp.
 #include "json.hpp"
 
 using json = nlohmann::json;
 using namespace std::chrono;
 
-// ────────────────────────────────────────────────────────────────────────────
-// Wire-format structs (packed, no compiler padding)
-// ────────────────────────────────────────────────────────────────────────────
+// ES: Estructuras binarias empaquetadas sin relleno del compilador. / EN: Packed wire-format structs without compiler padding.
 #pragma pack(push, 1)
 
 struct EtherHeader {
     uint8_t  dst[6];
     uint8_t  src[6];
-    uint16_t type;       // big-endian
+    uint16_t type;       // ES: big-endian. / EN: big-endian.
 };
 
 struct IpHeader {
-    uint8_t  ihl_ver;    // version (4 bits) | IHL (4 bits)
+    uint8_t  ihl_ver;    // ES: version (4 bits) | IHL (4 bits). / EN: version (4 bits) | IHL (4 bits).
     uint8_t  tos;
     uint16_t tot_len;
     uint16_t id;
@@ -88,8 +78,8 @@ struct TcpHeader {
     uint16_t dest;
     uint32_t seq;
     uint32_t ack_seq;
-    uint8_t  data_off;   // data offset (4 bits high)
-    uint8_t  flags;      // CWR ECE URG ACK PSH RST SYN FIN
+    uint8_t  data_off;   // ES: offset de datos en los 4 bits altos. / EN: data offset in the high 4 bits.
+    uint8_t  flags;      // ES/EN: CWR ECE URG ACK PSH RST SYN FIN.
     uint16_t window;
     uint16_t check;
     uint16_t urg_ptr;
@@ -123,12 +113,10 @@ struct ArpHeader {
 
 #pragma pack(pop)
 
-// ────────────────────────────────────────────────────────────────────────────
-// Global state
-// ────────────────────────────────────────────────────────────────────────────
+// ES: Estado global compartido por los hilos. / EN: Global state shared by threads.
 namespace g {
-    std::mutex          output_mtx;       // serialises stdout writes
-    std::mutex          capture_mtx;      // protects handle/state
+    std::mutex          output_mtx;       // ES: Serializa escrituras a stdout. / EN: Serializes stdout writes.
+    std::mutex          capture_mtx;      // ES: Protege el handle y el estado. / EN: Protects the handle and state.
     pcap_t*             handle   = nullptr;
     std::atomic<bool>   running  { false };
     std::atomic<uint64_t> pkt_id { 0 };
@@ -141,9 +129,7 @@ namespace g {
     std::thread         stdin_thread;
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// Thread-safe JSON output
-// ────────────────────────────────────────────────────────────────────────────
+// ES: Salida JSON segura entre hilos. / EN: Thread-safe JSON output.
 static void emit(const json& j) {
     std::lock_guard<std::mutex> lk(g::output_mtx);
     std::cout << j.dump() << "\n";
@@ -154,11 +140,9 @@ static void emit_error(const std::string& msg) {
     emit({ {"type","error"}, {"msg", msg} });
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// Helpers
-// ────────────────────────────────────────────────────────────────────────────
+// ES: Utilidades internas. / EN: Internal helpers.
 
-// Returns ISO-8601 timestamp with milliseconds, e.g. "2025-05-25T14:30:01.123Z"
+// ES: Devuelve una fecha ISO-8601 con milisegundos. / EN: Returns an ISO-8601 timestamp with milliseconds.
 static std::string iso8601_now() {
     auto now  = system_clock::now();
     auto tt   = system_clock::to_time_t(now);
@@ -205,7 +189,7 @@ static std::string bytes_to_ascii(const uint8_t* data, size_t len, size_t max_by
     return out;
 }
 
-// TCP flag bitmasks
+// ES: Mascaras de bits para flags TCP. / EN: TCP flag bitmasks.
 static const uint8_t FLAG_FIN = 0x01;
 static const uint8_t FLAG_SYN = 0x02;
 static const uint8_t FLAG_RST = 0x04;
@@ -226,9 +210,7 @@ static std::string tcp_flags_str(uint8_t f) {
     return "";
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// Interface enumeration
-// ────────────────────────────────────────────────────────────────────────────
+// ES: Enumeracion de interfaces de red. / EN: Network interface enumeration.
 static json enumerate_interfaces() {
     char errbuf[PCAP_ERRBUF_SIZE];
     pcap_if_t* devs = nullptr;
@@ -253,7 +235,7 @@ static json enumerate_interfaces() {
     return ifaces;
 }
 
-// Returns device name by index, or "" on failure
+// ES: Devuelve el nombre del dispositivo por indice o "" si falla. / EN: Returns the device name by index or "" on failure.
 static std::string iface_name_by_id(int idx) {
     char errbuf[PCAP_ERRBUF_SIZE];
     pcap_if_t* devs = nullptr;
@@ -269,10 +251,8 @@ static std::string iface_name_by_id(int idx) {
     return name;
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// Packet handler (called from pcap dispatch thread)
-// ────────────────────────────────────────────────────────────────────────────
-static void packet_handler(u_char* /*user*/,
+// ES: Procesa paquetes desde el hilo de pcap. / EN: Handles packets from the pcap dispatch thread.
+static void packet_handler(u_char* /* ES/EN: user data. */,
                             const struct pcap_pkthdr* hdr,
                             const u_char* pkt)
 {
@@ -283,7 +263,7 @@ static void packet_handler(u_char* /*user*/,
     out["ts"] = iso8601_now();
     out["length"] = hdr->len;
 
-    // Defaults
+    // ES: Valores predeterminados del evento. / EN: Default event values.
     out["src_ip"]   = nullptr;
     out["dst_ip"]   = nullptr;
     out["src_port"] = nullptr;
@@ -295,7 +275,7 @@ static void packet_handler(u_char* /*user*/,
     const uint8_t* data = reinterpret_cast<const uint8_t*>(pkt);
     uint32_t cap_len    = hdr->caplen;
 
-    // ── Ethernet ──────────────────────────────────────────────────────────
+    // ES/EN: Ethernet.
     if (cap_len < sizeof(EtherHeader)) {
         out["payload_hex"] = bytes_to_hex(data, cap_len);
         out["raw_ascii"]   = bytes_to_ascii(data, cap_len);
@@ -309,7 +289,7 @@ static void packet_handler(u_char* /*user*/,
     const uint8_t* l3   = data + sizeof(EtherHeader);
     uint32_t l3_len = cap_len - sizeof(EtherHeader);
 
-    // ── ARP ───────────────────────────────────────────────────────────────
+    // ES/EN: ARP.
     if (eth_type == 0x0806) {
         out["protocol"] = "ARP";
         if (l3_len >= sizeof(ArpHeader)) {
@@ -324,9 +304,9 @@ static void packet_handler(u_char* /*user*/,
         return;
     }
 
-    // ── IPv4 ──────────────────────────────────────────────────────────────
+    // ES/EN: IPv4.
     if (eth_type != 0x0800) {
-        // Non-IP, non-ARP: emit minimal info
+        // ES: Para protocolos distintos de IP y ARP emite informacion minima. / EN: Emit minimal information for non-IP, non-ARP protocols.
         out["payload_hex"] = bytes_to_hex(l3, l3_len);
         out["raw_ascii"]   = bytes_to_ascii(l3, l3_len);
         emit(out);
@@ -361,7 +341,7 @@ static void packet_handler(u_char* /*user*/,
     const uint8_t* l4   = l3 + ip_ihl;
     uint32_t l4_len = l3_len - ip_ihl;
 
-    // ── ICMP ──────────────────────────────────────────────────────────────
+    // ES/EN: ICMP.
     if (ip->protocol == IPPROTO_ICMP) {
         out["protocol"] = "ICMP";
         out["payload_hex"] = bytes_to_hex(l4, l4_len);
@@ -371,7 +351,7 @@ static void packet_handler(u_char* /*user*/,
         return;
     }
 
-    // ── UDP ───────────────────────────────────────────────────────────────
+    // ES/EN: UDP.
     if (ip->protocol == IPPROTO_UDP) {
         if (l4_len < sizeof(UdpHeader)) {
             out["protocol"]    = "UDP";
@@ -387,7 +367,7 @@ static void packet_handler(u_char* /*user*/,
         out["src_port"] = sport;
         out["dst_port"] = dport;
 
-        // Protocol detection
+        // ES: Detecta protocolos de aplicacion por puerto. / EN: Detect application protocols by port.
         if (sport == 53 || dport == 53)
             out["protocol"] = "DNS";
         else
@@ -402,7 +382,7 @@ static void packet_handler(u_char* /*user*/,
         return;
     }
 
-    // ── TCP ───────────────────────────────────────────────────────────────
+    // ES/EN: TCP.
     if (ip->protocol == IPPROTO_TCP) {
         if (l4_len < sizeof(TcpHeader)) {
             out["protocol"]    = "TCP";
@@ -419,7 +399,7 @@ static void packet_handler(u_char* /*user*/,
         out["dst_port"] = dport;
         out["flags"]    = tcp_flags_str(tcp->flags);
 
-        // Protocol detection
+        // ES: Detecta protocolos de aplicacion por puerto. / EN: Detect application protocols by port.
         auto is_port = [&](uint16_t p) { return sport == p || dport == p; };
         if (is_port(53))
             out["protocol"] = "DNS";
@@ -443,24 +423,20 @@ static void packet_handler(u_char* /*user*/,
         return;
     }
 
-    // ── Other IP protocols ─────────────────────────────────────────────────
+    // ES: Otros protocolos IP. / EN: Other IP protocols.
     out["payload_hex"] = bytes_to_hex(l4, l4_len);
     out["raw_ascii"]   = bytes_to_ascii(l4, l4_len);
     emit(out);
     ++g::captured;
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// Capture thread body
-// ────────────────────────────────────────────────────────────────────────────
+// ES: Cuerpo del hilo de captura. / EN: Capture thread body.
 static void capture_loop(pcap_t* handle) {
-    // pcap_loop blocks until pcap_breakloop() is called or error
-    pcap_loop(handle, 0 /*infinite*/, packet_handler, nullptr);
+    // ES: pcap_loop bloquea hasta llamar pcap_breakloop() o hasta un error. / EN: pcap_loop blocks until pcap_breakloop() is called or an error occurs.
+    pcap_loop(handle, 0 /* ES: infinito. / EN: infinite. */, packet_handler, nullptr);
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// Stats thread: emits one stats line per second
-// ────────────────────────────────────────────────────────────────────────────
+// ES: El hilo de estadisticas emite una linea por segundo. / EN: The stats thread emits one line per second.
 static void stats_loop() {
     using clock = steady_clock;
     auto prev_time = clock::now();
@@ -476,7 +452,7 @@ static void stats_loop() {
         uint64_t cap = g::captured.load(std::memory_order_relaxed);
         uint64_t drp = g::dropped.load(std::memory_order_relaxed);
 
-        // Update dropped from pcap stats if a handle is open
+        // ES: Actualiza descartados desde pcap si existe un handle. / EN: Update dropped packets from pcap when a handle is open.
         {
             std::lock_guard<std::mutex> lk(g::capture_mtx);
             if (g::handle) {
@@ -501,14 +477,12 @@ static void stats_loop() {
     }
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// Start capture on given interface id
-// ────────────────────────────────────────────────────────────────────────────
+// ES: Inicia captura en la interfaz indicada. / EN: Start capture on the requested interface.
 static void do_stop();
 
 static bool do_start(int iface_id) {
-    // Stop any prior loop before locking for the new handle. Joining while
-    // holding capture_mtx would deadlock with capture_loop.
+    // ES: Detiene el loop anterior antes de bloquear; hacer join con capture_mtx causaria deadlock.
+    // EN: Stop the prior loop before locking; joining with capture_mtx held would deadlock.
     do_stop();
 
     std::lock_guard<std::mutex> lk(g::capture_mtx);
@@ -520,14 +494,14 @@ static bool do_start(int iface_id) {
     }
 
     char errbuf[PCAP_ERRBUF_SIZE];
-    // snaplen=65535, promiscuous=1, timeout=100ms
+    // ES/EN: snaplen=65535, promiscuous=1, timeout=100ms.
     pcap_t* h = pcap_open_live(name.c_str(), 65535, 1, 100, errbuf);
     if (!h) {
         emit_error(std::string("pcap_open_live: ") + errbuf);
         return false;
     }
 
-    // Apply current filter if any
+    // ES: Aplica el filtro actual si existe. / EN: Apply the current filter if present.
     if (!g::current_filter.empty()) {
         struct bpf_program fp{};
         if (pcap_compile(h, &fp, g::current_filter.c_str(), 1, PCAP_NETMASK_UNKNOWN) == -1) {
@@ -547,9 +521,7 @@ static bool do_start(int iface_id) {
     return true;
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// Stop capture
-// ────────────────────────────────────────────────────────────────────────────
+// ES: Detiene la captura. / EN: Stop capture.
 static void do_stop() {
     {
         std::lock_guard<std::mutex> lk(g::capture_mtx);
@@ -567,14 +539,12 @@ static void do_stop() {
     g::running = false;
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// Apply / re-apply BPF filter
-// ────────────────────────────────────────────────────────────────────────────
+// ES: Aplica o reaplica el filtro BPF. / EN: Apply or re-apply the BPF filter.
 static void do_set_filter(const std::string& bpf) {
     std::lock_guard<std::mutex> lk(g::capture_mtx);
     g::current_filter = bpf;
 
-    if (!g::handle) return;   // will be applied on next start
+    if (!g::handle) return;   // ES: Se aplicara en el proximo inicio. / EN: It will be applied on the next start.
 
     struct bpf_program fp{};
     if (pcap_compile(g::handle, &fp, bpf.c_str(), 1, PCAP_NETMASK_UNKNOWN) == -1) {
@@ -586,9 +556,7 @@ static void do_set_filter(const std::string& bpf) {
     pcap_freecode(&fp);
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// stdin command loop
-// ────────────────────────────────────────────────────────────────────────────
+// ES: Loop de comandos recibidos por stdin. / EN: stdin command loop.
 static void stdin_loop() {
     std::string line;
     while (std::getline(std::cin, line)) {
@@ -612,7 +580,7 @@ static void stdin_loop() {
         if (c == "start") {
             int iface_id = cmd.value("interface_id", 0);
             if (!do_start(iface_id)) {
-                // Let Rust observe process termination and close the session.
+                // ES: Permite que Rust detecte el fin del proceso y cierre la sesion. / EN: Let Rust observe process termination and close the session.
                 return;
             } else {
                 emit({ {"type","info"}, {"msg","capture started"},
@@ -629,7 +597,7 @@ static void stdin_loop() {
             emit({ {"type","info"}, {"msg","filter applied"}, {"bpf", bpf} });
 
         } else if (c == "set_interface") {
-            // Just update the stored id; actual change happens on next "start"
+            // ES: Solo guarda el id; el cambio real ocurre con el siguiente "start". / EN: Only store the id; the actual change happens on the next "start".
             int id = cmd.value("interface_id", 0);
             g::current_iface = id;
             emit({ {"type","info"}, {"msg","interface selected"},
@@ -644,35 +612,33 @@ static void stdin_loop() {
         }
     }
 
-    // stdin closed → shut down cleanly
+    // ES: Si stdin se cierra, finaliza limpiamente. / EN: Shut down cleanly when stdin closes.
     do_stop();
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// main
-// ────────────────────────────────────────────────────────────────────────────
+// ES: Punto de entrada. / EN: Entry point.
 int main() {
-    // Unbuffered stdout so Tauri receives lines immediately
+    // ES: stdout sin buffer para que Tauri reciba lineas inmediatamente. / EN: Use unbuffered stdout so Tauri receives lines immediately.
     std::cout.setf(std::ios::unitbuf);
 
 #ifdef _WIN32
-    // Npcap requires WSAStartup on Windows
+    // ES: Npcap requiere WSAStartup en Windows. / EN: Npcap requires WSAStartup on Windows.
     WSADATA wsa{};
     WSAStartup(MAKEWORD(2, 2), &wsa);
-    // Also set stdout to binary mode to avoid \r\n conversion
+    // ES: Usa stdout binario para evitar conversion a \r\n. / EN: Use binary stdout to avoid \r\n conversion.
     _setmode(_fileno(stdout), _O_BINARY);
     _setmode(_fileno(stdin),  _O_BINARY);
 #endif
 
-    // Emit ready + interface list
+    // ES: Emite ready y la lista de interfaces. / EN: Emit ready and the interface list.
     json ifaces = enumerate_interfaces();
     emit({ {"type","ready"}, {"interfaces", ifaces} });
 
-    // Start stats emitter
+    // ES: Inicia el emisor de estadisticas. / EN: Start the stats emitter.
     g::stats_thread = std::thread(stats_loop);
     g::stats_thread.detach();
 
-    // Block on stdin commands (blocks until stdin is closed / process killed)
+    // ES: Espera comandos hasta cerrar stdin o terminar el proceso. / EN: Wait for commands until stdin closes or the process is killed.
     stdin_loop();
 
 #ifdef _WIN32

@@ -1,10 +1,3 @@
-//! commands.rs
-//!
-//! All `#[tauri::command]` handlers exposed to the frontend.
-//!
-//! AppState now holds both the SidecarManager and a DbManager so every
-//! command has access to live capture control AND persistent storage.
-
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
@@ -13,14 +6,10 @@ use tauri::{AppHandle, State};
 use crate::db::{DbManager, DiagnosticsData, PacketFilters, PacketRow, PaginatedResult, Session};
 use crate::sniffer::{Interface, SidecarManager, Stats};
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Application-wide state
-// ─────────────────────────────────────────────────────────────────────────────
-
+// ES: Estado global compartido por todos los comandos Tauri. / EN: Global state shared by all Tauri commands.
 pub struct AppState {
     pub sniffer: Mutex<SidecarManager>,
     pub db: Arc<DbManager>,
-    /// Active session id (set on start_capture, cleared on stop_capture).
     pub active_session_id: Arc<Mutex<Option<i64>>>,
 }
 
@@ -34,39 +23,19 @@ impl AppState {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Internal lock helpers
-// ─────────────────────────────────────────────────────────────────────────────
-
 macro_rules! lock {
     ($mutex:expr) => {
         $mutex.lock().map_err(|e| format!("mutex poisoned: {e}"))
     };
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Capture lifecycle
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Parameters accepted by `start_capture`.
 #[derive(Debug, Deserialize)]
 pub struct StartCaptureArgs {
     pub interface_id: u32,
-    /// Human-readable session label (optional, defaults to interface name).
     pub session_name: Option<String>,
-    /// Interface name string for DB storage (e.g. "eth0").
     pub interface_name: Option<String>,
 }
 
-/// Start packet capture and open a new DB session.
-///
-/// ```ts
-/// await invoke('start_capture', {
-///   interfaceId: 0,
-///   sessionName: 'Morning traffic',
-///   interfaceName: 'eth0',
-/// });
-/// ```
 #[tauri::command]
 pub fn start_capture(
     args: StartCaptureArgs,
@@ -79,7 +48,8 @@ pub fn start_capture(
         return Err("Capture already running. Call stop_capture first.".into());
     }
 
-    // Create a DB session before spawning so the session_id is known.
+    // ES: Crea primero la sesion para asociar los paquetes desde el primer evento.
+    // EN: Create the session first so packets are associated from the first event.
     let session_id = state
         .db
         .create_session(args.session_name.as_deref(), args.interface_name.as_deref())
@@ -101,11 +71,6 @@ pub fn start_capture(
     Ok(session_id)
 }
 
-/// Stop the active capture and close the DB session.
-///
-/// ```ts
-/// await invoke('stop_capture');
-/// ```
 #[tauri::command]
 pub fn stop_capture(state: State<'_, AppState>) -> Result<(), String> {
     let mut sniffer = lock!(state.sniffer)?;
@@ -116,7 +81,6 @@ pub fn stop_capture(state: State<'_, AppState>) -> Result<(), String> {
             .map_err(|e| format!("stop_capture failed: {e}"))?;
     }
 
-    // Close DB session
     let session_id = lock!(state.active_session_id)?.take();
     if let Some(sid) = session_id {
         let total = state
@@ -133,11 +97,6 @@ pub fn stop_capture(state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
-/// Restart capture on a different interface.
-///
-/// ```ts
-/// await invoke('set_interface', { interfaceId: 2 });
-/// ```
 #[tauri::command]
 pub fn set_interface(interface_id: u32, state: State<'_, AppState>) -> Result<(), String> {
     let sniffer = lock!(state.sniffer)?;
@@ -148,15 +107,6 @@ pub fn set_interface(interface_id: u32, state: State<'_, AppState>) -> Result<()
     Ok(())
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// BPF filter
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Apply a BPF filter expression to the running capture.
-///
-/// ```ts
-/// await invoke('set_bpf_filter', { filter: 'tcp port 443' });
-/// ```
 #[tauri::command]
 pub fn set_bpf_filter(filter: String, state: State<'_, AppState>) -> Result<(), String> {
     let sniffer = lock!(state.sniffer)?;
@@ -170,21 +120,12 @@ pub fn set_bpf_filter(filter: String, state: State<'_, AppState>) -> Result<(), 
         .map_err(|e| format!("set_bpf_filter: {e}"))
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Interfaces
-// ─────────────────────────────────────────────────────────────────────────────
-
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ListInterfacesResponse {
     pub interfaces: Vec<Interface>,
     pub refreshed: bool,
 }
 
-/// Return available network interfaces (cached + async refresh if running).
-///
-/// ```ts
-/// const { interfaces } = await invoke<ListInterfacesResponse>('list_interfaces');
-/// ```
 #[tauri::command]
 pub fn list_interfaces(state: State<'_, AppState>) -> Result<ListInterfacesResponse, String> {
     let sniffer = lock!(state.sniffer)?;
@@ -204,26 +145,12 @@ pub fn list_interfaces(state: State<'_, AppState>) -> Result<ListInterfacesRespo
     })
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Live stats
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Pull-based stats snapshot (also pushed via "net_stats" event every 1 s).
-///
-/// ```ts
-/// const stats = await invoke<Stats>('get_stats');
-/// ```
 #[tauri::command]
 pub fn get_stats(state: State<'_, AppState>) -> Result<Stats, String> {
     let sniffer = lock!(state.sniffer)?;
     Ok(sniffer.get_stats())
 }
 
-/// Whether the sidecar is currently capturing.
-///
-/// ```ts
-/// const { running } = await invoke<CaptureStatusResponse>('capture_status');
-/// ```
 #[derive(Debug, Serialize)]
 pub struct CaptureStatusResponse {
     pub running: bool,
@@ -240,28 +167,13 @@ pub fn capture_status(state: State<'_, AppState>) -> Result<CaptureStatusRespons
     })
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Session management commands
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// List all recorded sessions (newest first).
-///
-/// ```ts
-/// const sessions = await invoke<Session[]>('list_sessions');
-/// ```
 #[tauri::command]
 pub fn list_sessions(state: State<'_, AppState>) -> Result<Vec<Session>, String> {
     state.db.list_sessions()
 }
 
-/// Delete a session and all its packets.
-///
-/// ```ts
-/// await invoke('delete_session', { sessionId: 3 });
-/// ```
 #[tauri::command]
 pub fn delete_session(session_id: i64, state: State<'_, AppState>) -> Result<(), String> {
-    // Refuse to delete the currently active session
     let active = lock!(state.active_session_id)?.clone();
     if active == Some(session_id) {
         return Err("Cannot delete the active capture session.".into());
@@ -269,19 +181,6 @@ pub fn delete_session(session_id: i64, state: State<'_, AppState>) -> Result<(),
     state.db.delete_session(session_id)
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Packet persistence — write path
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Persist a single packet into the current session.
-///
-/// Intended to be called from the Rust event handler inside `sniffer.rs`
-/// rather than from the frontend directly, but exposed as a command for
-/// testing / replay scenarios.
-///
-/// ```ts
-/// await invoke('persist_packet', { packet: { ... } });
-/// ```
 #[tauri::command]
 pub fn persist_packet(packet: PacketRow, state: State<'_, AppState>) -> Result<(), String> {
     let session_id =
@@ -293,11 +192,6 @@ pub fn persist_packet(packet: PacketRow, state: State<'_, AppState>) -> Result<(
         .map_err(|e| format!("persist_packet: {e}"))
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Packet query — paginated read path
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Arguments for `query_packets`.
 #[derive(Debug, Deserialize)]
 pub struct QueryPacketsArgs {
     pub session_id: i64,
@@ -306,19 +200,6 @@ pub struct QueryPacketsArgs {
     pub page_size: u32,
 }
 
-/// Paginated, filtered packet query.
-///
-/// ```ts
-/// const result = await invoke<PaginatedResult<PacketRow>>('query_packets', {
-///   sessionId: 1,
-///   filters: { protocol: 'HTTPS', minLength: 100 },
-///   page: 1,
-///   pageSize: 100,
-/// });
-/// // result.items   — packets on this page
-/// // result.total   — total matching rows
-/// // result.totalPages
-/// ```
 #[tauri::command]
 pub fn query_packets(
     args: QueryPacketsArgs,
@@ -329,20 +210,6 @@ pub fn query_packets(
         .get_packets_paginated(args.session_id, &args.filters, args.page, args.page_size)
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Diagnostics & analytics
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Return the full analytics bundle for a session.
-///
-/// Includes protocol distribution, traffic timeline (5-second buckets),
-/// top source and destination IPs, byte totals, and recent error rows.
-///
-/// ```ts
-/// const data = await invoke<DiagnosticsData>('get_diagnostics_data', {
-///   sessionId: 1,
-/// });
-/// ```
 #[tauri::command]
 pub fn get_diagnostics_data(
     session_id: i64,
@@ -354,13 +221,6 @@ pub fn get_diagnostics_data(
         .map_err(|e| format!("get_diagnostics_data: {e}"))
 }
 
-/// Record a named metric in the diagnostics table.
-///
-/// ```ts
-/// await invoke('record_diagnostic', {
-///   sessionId: 1, metric: 'drop_rate', value: 0.03,
-/// });
-/// ```
 #[tauri::command]
 pub fn record_diagnostic(
     session_id: i64,
@@ -374,13 +234,6 @@ pub fn record_diagnostic(
         .map_err(|e| format!("record_diagnostic: {e}"))
 }
 
-/// Export all packets for a session as a JSON array string.
-///
-/// Intended for "Save capture" / CSV-export workflows in the frontend.
-///
-/// ```ts
-/// const json = await invoke<string>('export_packets_json', { sessionId: 1 });
-/// ```
 #[tauri::command]
 pub fn export_packets_json(
     session_id: i64,

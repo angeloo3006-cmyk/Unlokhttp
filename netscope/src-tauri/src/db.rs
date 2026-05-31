@@ -1,32 +1,10 @@
-//! db.rs
-//!
-//! SQLite persistence layer for Netscope.
-//!
-//! One `DbManager` instance lives for the entire application lifetime,
-//! stored in Tauri's state as `Arc<DbManager>` (no outer Mutex needed
-//! because the inner `Connection` is already wrapped in `Mutex`).
-//!
-//! Design notes:
-//!  • `rusqlite::Connection` is `!Send`, so it is kept behind
-//!    `std::sync::Mutex` and every method acquires the lock for the
-//!    duration of a single statement or transaction.
-//!  • All query methods that build dynamic WHERE clauses do so via a
-//!    `QueryBuilder` helper that pushes positional parameters to avoid
-//!    SQL injection.
-//!  • Heavy analytical queries (timeline, top-IPs) use only SQLite
-//!    built-ins — no extension required.
-
 use std::path::PathBuf;
 use std::sync::Mutex;
 
 use rusqlite::{params, Connection, Result as SqlResult, Row};
 use serde::{Deserialize, Serialize};
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Public data types
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// A session groups all packets captured in one "start → stop" lifecycle.
+// ES: Tipos serializables compartidos con Tauri. / EN: Serializable types shared with Tauri.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub id: i64,
@@ -37,11 +15,8 @@ pub struct Session {
     pub total_packets: i64,
 }
 
-/// Mirror of the `packets` table row.
-/// Used both for inserts and for query results.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PacketRow {
-    /// Matches the `id` emitted by `sniffer_core` (sidecar-assigned).
     pub id: i64,
     pub session_id: i64,
     pub ts: String,
@@ -57,7 +32,6 @@ pub struct PacketRow {
     pub raw_ascii: Option<String>,
 }
 
-/// All-optional filter bag used by `get_packets` / `query_packets`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PacketFilters {
     pub src_ip: Option<String>,
@@ -65,38 +39,30 @@ pub struct PacketFilters {
     pub src_port: Option<u32>,
     pub dst_port: Option<u32>,
     pub protocol: Option<String>,
-    /// Minimum packet length in bytes (inclusive).
     pub min_length: Option<u32>,
-    /// Maximum packet length in bytes (inclusive).
     pub max_length: Option<u32>,
-    /// Free-form BPF-like text search across src_ip / dst_ip (LIKE match).
     pub search: Option<String>,
 }
 
-/// (protocol_name, packet_count) pair.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProtocolStat {
     pub protocol: String,
     pub count: i64,
 }
 
-/// One point in the traffic timeline.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimePoint {
-    /// ISO-8601 bucket start (truncated to `bucket_secs` boundary).
     pub bucket: String,
     pub packets: i64,
     pub bytes: i64,
 }
 
-/// (ip_address, packet_count) pair — top talkers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TopIp {
     pub ip: String,
     pub count: i64,
 }
 
-/// One diagnostics row.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiagnosticRow {
     pub id: i64,
@@ -106,7 +72,6 @@ pub struct DiagnosticRow {
     pub value: Option<f64>,
 }
 
-/// Paginated result wrapper (generic over the item type).
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PaginatedResult<T: Serialize> {
     pub items: Vec<T>,
@@ -116,7 +81,6 @@ pub struct PaginatedResult<T: Serialize> {
     pub total_pages: u32,
 }
 
-/// Aggregated diagnostics returned by `get_diagnostics_data`.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DiagnosticsData {
     pub session_id: i64,
@@ -130,17 +94,10 @@ pub struct DiagnosticsData {
     pub recent_errors: Vec<DiagnosticRow>,
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Internal query builder
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Lightweight helper that accumulates WHERE clauses and their bound values
-/// so we can construct dynamic SQL safely without string interpolation.
+// ES: Construye filtros SQL con parametros enlazados para evitar inyeccion.
+// EN: Builds SQL filters with bound parameters to prevent injection.
 struct QueryBuilder {
     clauses: Vec<String>,
-    /// Boxed values that implement `rusqlite::ToSql`.
-    /// We store them as `Box<dyn rusqlite::types::ToSql>` so we can collect
-    /// heterogeneous types before passing to `query_map`.
     values: Vec<Box<dyn rusqlite::types::ToSql>>,
 }
 
@@ -152,7 +109,6 @@ impl QueryBuilder {
         }
     }
 
-    /// Push a `field = ?` clause with the given value.
     fn eq<V>(&mut self, column: &str, value: V)
     where
         V: rusqlite::types::ToSql + 'static,
@@ -162,7 +118,6 @@ impl QueryBuilder {
         self.values.push(Box::new(value));
     }
 
-    /// Push a `field >= ?` clause.
     fn gte<V>(&mut self, column: &str, value: V)
     where
         V: rusqlite::types::ToSql + 'static,
@@ -172,7 +127,6 @@ impl QueryBuilder {
         self.values.push(Box::new(value));
     }
 
-    /// Push a `field <= ?` clause.
     fn lte<V>(&mut self, column: &str, value: V)
     where
         V: rusqlite::types::ToSql + 'static,
@@ -182,7 +136,6 @@ impl QueryBuilder {
         self.values.push(Box::new(value));
     }
 
-    /// Build the `WHERE …` fragment (empty string when no clauses).
     fn where_clause(&self) -> String {
         if self.clauses.is_empty() {
             String::new()
@@ -191,15 +144,10 @@ impl QueryBuilder {
         }
     }
 
-    /// Return the parameter slice for `rusqlite::Statement::query`.
     fn params(&self) -> Vec<&dyn rusqlite::types::ToSql> {
         self.values.iter().map(|b| b.as_ref()).collect()
     }
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Row deserialisation helpers
-// ─────────────────────────────────────────────────────────────────────────────
 
 fn row_to_packet(row: &Row<'_>) -> SqlResult<PacketRow> {
     Ok(PacketRow {
@@ -240,28 +188,13 @@ fn row_to_diagnostic(row: &Row<'_>) -> SqlResult<DiagnosticRow> {
     })
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// DbManager
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Application-wide SQLite manager.
-///
-/// Stored in Tauri state as `Arc<DbManager>`:
-/// ```rust
-/// .manage(Arc::new(DbManager::new(data_dir).expect("db init failed")))
-/// ```
+// ES: Mantiene una unica conexion SQLite protegida por mutex. / EN: Holds one SQLite connection protected by a mutex.
 pub struct DbManager {
     conn: Mutex<Connection>,
 }
 
 impl DbManager {
-    // ── Construction ──────────────────────────────────────────────────────
-
-    /// Open (or create) `netscope.db` inside `app_data_dir`.
-    ///
-    /// Calls `init_schema` automatically after opening.
     pub fn new(app_data_dir: PathBuf) -> Result<Self, String> {
-        // Ensure the directory exists
         std::fs::create_dir_all(&app_data_dir)
             .map_err(|e| format!("cannot create data dir {app_data_dir:?}: {e}"))?;
 
@@ -270,12 +203,11 @@ impl DbManager {
         let conn =
             Connection::open(&db_path).map_err(|e| format!("cannot open {db_path:?}: {e}"))?;
 
-        // Performance pragmas — applied once per connection
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous  = NORMAL;
              PRAGMA foreign_keys = ON;
-             PRAGMA cache_size   = -32000;  -- 32 MB page cache
+             PRAGMA cache_size   = -32000;  -- ES/EN: Cache de paginas / page cache: 32 MB
              PRAGMA temp_store   = MEMORY;",
         )
         .map_err(|e| format!("pragma setup failed: {e}"))?;
@@ -289,15 +221,11 @@ impl DbManager {
         Ok(mgr)
     }
 
-    // ── Schema initialisation ─────────────────────────────────────────────
-
-    /// Create all tables and indices if they do not already exist.
-    /// Safe to call on every startup.
     pub fn init_schema(&self) -> Result<(), String> {
         let conn = self.lock()?;
         conn.execute_batch(
             "
-            -- Sessions ──────────────────────────────────────────────────────
+            -- ES/EN: Sesiones / Sessions
             CREATE TABLE IF NOT EXISTS sessions (
                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
                 name          TEXT,
@@ -307,7 +235,7 @@ impl DbManager {
                 total_packets INTEGER DEFAULT 0
             );
 
-            -- Packets ────────────────────────────────────────────────────────
+            -- ES/EN: Paquetes / Packets
             CREATE TABLE IF NOT EXISTS packets (
                 id          INTEGER NOT NULL,
                 session_id  INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
@@ -325,7 +253,7 @@ impl DbManager {
                 PRIMARY KEY (session_id, id)
             );
 
-            -- Diagnostics ────────────────────────────────────────────────────
+            -- ES/EN: Diagnosticos / Diagnostics
             CREATE TABLE IF NOT EXISTS diagnostics (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id INTEGER,
@@ -402,9 +330,6 @@ impl DbManager {
         .map_err(|e| format!("create packet indexes failed: {e}"))
     }
 
-    // ── Session management ────────────────────────────────────────────────
-
-    /// Create a new capture session and return its auto-assigned id.
     pub fn create_session(
         &self,
         name: Option<&str>,
@@ -423,7 +348,6 @@ impl DbManager {
         Ok(conn.last_insert_rowid())
     }
 
-    /// Mark a session as finished and update its packet counter.
     pub fn close_session(&self, session_id: i64, total_packets: i64) -> Result<(), String> {
         let conn = self.lock()?;
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
@@ -439,7 +363,6 @@ impl DbManager {
         Ok(())
     }
 
-    /// List all sessions, newest first.
     pub fn list_sessions(&self) -> Result<Vec<Session>, String> {
         let conn = self.lock()?;
         let mut stmt = conn
@@ -457,7 +380,6 @@ impl DbManager {
             .map_err(|e| format!("list_sessions collect: {e}"))
     }
 
-    /// Delete a session and all its packets (CASCADE).
     pub fn delete_session(&self, session_id: i64) -> Result<(), String> {
         let conn = self.lock()?;
         conn.execute("DELETE FROM sessions WHERE id = ?1", params![session_id])
@@ -465,12 +387,6 @@ impl DbManager {
         Ok(())
     }
 
-    // ── Packet insertion ──────────────────────────────────────────────────
-
-    /// Insert a single packet.
-    ///
-    /// The `id` field comes from the sidecar (uint64 counter). If there is a
-    /// collision within the same session the row is silently replaced.
     pub fn insert_packet(&self, session_id: i64, pkt: &PacketRow) -> Result<(), String> {
         let conn = self.lock()?;
         conn.execute(
@@ -498,10 +414,6 @@ impl DbManager {
         Ok(())
     }
 
-    /// Bulk-insert packets in a single transaction.
-    ///
-    /// Significantly faster than individual `insert_packet` calls for
-    /// high-rate captures (thousands of packets per second).
     #[allow(dead_code)]
     pub fn insert_packets_bulk(&self, session_id: i64, pkts: &[PacketRow]) -> Result<(), String> {
         if pkts.is_empty() {
@@ -546,11 +458,6 @@ impl DbManager {
         tx.commit().map_err(|e| format!("bulk tx commit: {e}"))
     }
 
-    // ── Packet queries ────────────────────────────────────────────────────
-
-    /// Return packets for `session_id` matching all active filters.
-    ///
-    /// Returns all matching rows (use `query_packets_paginated` for UI lists).
     pub fn get_packets(
         &self,
         session_id: i64,
@@ -559,7 +466,6 @@ impl DbManager {
         let conn = self.lock()?;
         let mut qb = QueryBuilder::new();
 
-        // Always filter by session
         qb.eq("session_id", session_id);
         Self::apply_filters(&mut qb, filters);
 
@@ -584,7 +490,6 @@ impl DbManager {
             .map_err(|e| format!("get_packets collect: {e}"))
     }
 
-    /// Paginated packet query — the primary method used by the UI table.
     pub fn get_packets_paginated(
         &self,
         session_id: i64,
@@ -597,13 +502,11 @@ impl DbManager {
         let page_size = page_size.clamp(1, 1000);
         let offset = (page - 1) * page_size;
 
-        // Build shared WHERE block
         let mut qb = QueryBuilder::new();
         qb.eq("session_id", session_id);
         Self::apply_filters(&mut qb, filters);
         let where_sql = qb.where_clause();
 
-        // COUNT
         let count_sql = format!("SELECT COUNT(*) FROM packets{where_sql}");
         let mut count_stmt = conn
             .prepare(&count_sql)
@@ -613,7 +516,6 @@ impl DbManager {
             .query_row(params_ref.as_slice(), |r| r.get(0))
             .map_err(|e| format!("count query: {e}"))?;
 
-        // DATA — re-build qb because the previous borrow already consumed the refs
         let mut qb2 = QueryBuilder::new();
         qb2.eq("session_id", session_id);
         Self::apply_filters(&mut qb2, filters);
@@ -654,9 +556,6 @@ impl DbManager {
         })
     }
 
-    // ── Analytical queries ────────────────────────────────────────────────
-
-    /// Count of packets per protocol for a session.
     pub fn get_protocol_stats(&self, session_id: i64) -> Result<Vec<ProtocolStat>, String> {
         let conn = self.lock()?;
         let mut stmt = conn
@@ -682,10 +581,6 @@ impl DbManager {
             .map_err(|e| format!("protocol_stats collect: {e}"))
     }
 
-    /// Packet count and byte volume aggregated into time buckets.
-    ///
-    /// `bucket_secs` controls the bucket width (e.g. 1 = per second,
-    /// 60 = per minute).  Uses SQLite's `strftime` for grouping.
     pub fn get_traffic_timeline(
         &self,
         session_id: i64,
@@ -694,8 +589,6 @@ impl DbManager {
         let conn = self.lock()?;
         let bucket_secs = bucket_secs.clamp(1, 3600) as i64;
 
-        // SQLite doesn't support sub-second DATETIME buckets natively, so we
-        // cast the ISO timestamp to a unix epoch, divide, then convert back.
         let mut stmt = conn
             .prepare(
                 "SELECT
@@ -727,17 +620,14 @@ impl DbManager {
             .map_err(|e| format!("timeline collect: {e}"))
     }
 
-    /// Top `limit` source IPs by packet count.
     pub fn get_top_src_ips(&self, session_id: i64, limit: u32) -> Result<Vec<TopIp>, String> {
         self.top_ips_for_column(session_id, "src_ip", limit)
     }
 
-    /// Top `limit` destination IPs by packet count.
     pub fn get_top_dst_ips(&self, session_id: i64, limit: u32) -> Result<Vec<TopIp>, String> {
         self.top_ips_for_column(session_id, "dst_ip", limit)
     }
 
-    /// Combined: top `limit` IPs appearing as either src or dst.
     #[allow(dead_code)]
     pub fn get_top_ips(&self, session_id: i64, limit: u32) -> Result<Vec<TopIp>, String> {
         let conn = self.lock()?;
@@ -776,9 +666,7 @@ impl DbManager {
             .map_err(|e| format!("top_ips collect: {e}"))
     }
 
-    /// Aggregate statistics summary for a session.
     pub fn get_session_summary(&self, session_id: i64) -> Result<(i64, i64, f64), String> {
-        // Returns (total_packets, total_bytes, avg_size)
         let conn = self.lock()?;
         let mut stmt = conn
             .prepare(
@@ -800,9 +688,6 @@ impl DbManager {
         .map_err(|e| format!("session_summary query: {e}"))
     }
 
-    // ── Diagnostics ───────────────────────────────────────────────────────
-
-    /// Record a named metric value for a session.
     pub fn insert_diagnostic(
         &self,
         session_id: i64,
@@ -821,7 +706,6 @@ impl DbManager {
         Ok(())
     }
 
-    /// Retrieve recent diagnostic rows for a session (newest first).
     pub fn get_diagnostics(
         &self,
         session_id: i64,
@@ -848,14 +732,9 @@ impl DbManager {
             .map_err(|e| format!("get_diagnostics collect: {e}"))
     }
 
-    // ── Composite / convenience ───────────────────────────────────────────
-
-    /// Build the full `DiagnosticsData` bundle in one call.
-    ///
-    /// This is what the `get_diagnostics_data` Tauri command returns.
     pub fn build_diagnostics_data(&self, session_id: i64) -> Result<DiagnosticsData, String> {
         let protocol_stats = self.get_protocol_stats(session_id)?;
-        let traffic_timeline = self.get_traffic_timeline(session_id, 5)?; // 5-second buckets
+        let traffic_timeline = self.get_traffic_timeline(session_id, 5)?; // ES: Bloques de 5 segundos. / EN: 5-second buckets.
         let top_src_ips = self.get_top_src_ips(session_id, 20)?;
         let top_dst_ips = self.get_top_dst_ips(session_id, 20)?;
         let (total_packets, total_bytes, avg_packet_size) = self.get_session_summary(session_id)?;
@@ -874,16 +753,12 @@ impl DbManager {
         })
     }
 
-    // ── Private helpers ───────────────────────────────────────────────────
-
-    /// Acquire the connection mutex, mapping poison to `String` error.
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>, String> {
         self.conn
             .lock()
             .map_err(|e| format!("db mutex poisoned: {e}"))
     }
 
-    /// Shared implementation for `get_top_src_ips` / `get_top_dst_ips`.
     fn top_ips_for_column(
         &self,
         session_id: i64,
@@ -893,7 +768,6 @@ impl DbManager {
         let conn = self.lock()?;
         let limit = limit.clamp(1, 500) as i64;
 
-        // Column name is not user-supplied; it is always one of two literals.
         let sql = format!(
             "SELECT {column} AS ip, COUNT(*) AS cnt
              FROM packets
@@ -920,8 +794,6 @@ impl DbManager {
             .map_err(|e| format!("top_ips_for_column collect: {e}"))
     }
 
-    /// Append filter predicates to `qb` from a `PacketFilters` struct.
-    /// Called by both `get_packets` and `get_packets_paginated`.
     fn apply_filters(qb: &mut QueryBuilder, f: &PacketFilters) {
         if let Some(ref v) = f.src_ip {
             qb.eq("src_ip", v.clone());
@@ -945,10 +817,8 @@ impl DbManager {
             qb.lte("length", v as i32);
         }
 
-        // Free-text search: match either IP column
         if let Some(ref s) = f.search {
             let pattern = format!("%{s}%");
-            // SQLite supports (a LIKE ? OR b LIKE ?) in a single predicate
             let idx = qb.values.len();
             qb.clauses.push(format!(
                 "(src_ip LIKE ?{} OR dst_ip LIKE ?{} OR protocol LIKE ?{})",

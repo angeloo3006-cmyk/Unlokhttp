@@ -1,13 +1,3 @@
-//! sniffer.rs
-//!
-//! Manages the `sniffer_core` C++ sidecar process.
-//!
-//! Responsibilities:
-//!  • Spawn / kill the sidecar via `tauri_plugin_shell`.
-//!  • Forward JSON commands to the sidecar's stdin.
-//!  • Parse every stdout line and emit typed Tauri events to the frontend.
-//!  • Maintain an in-memory snapshot of the last stats and interface list.
-
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -21,11 +11,7 @@ use tokio::sync::mpsc::{self, UnboundedSender};
 
 use crate::db::{DbManager, PacketRow};
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Public data types (also used in commands.rs)
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// One network interface returned by the sidecar on startup or `list_interfaces`.
+// ES: Tipos compartidos con los comandos Tauri. / EN: Types shared with Tauri commands.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Interface {
     pub id: u32,
@@ -35,7 +21,6 @@ pub struct Interface {
     pub up: bool,
 }
 
-/// Throughput / drop statistics snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Stats {
     pub captured: u64,
@@ -43,8 +28,6 @@ pub struct Stats {
     pub rate_pps: f64,
 }
 
-/// A single captured packet as forwarded to the frontend.
-/// All fields mirror the sidecar's JSON schema.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Packet {
     pub id: u64,
@@ -61,36 +44,22 @@ pub struct Packet {
     pub raw_ascii: String,
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Internal state
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Shared snapshot kept inside `SidecarManager`.
 #[derive(Debug, Default)]
 struct Snapshot {
     stats: Stats,
     interfaces: Vec<Interface>,
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// SidecarManager
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Top-level manager held in Tauri's `State<Mutex<SidecarManager>>`.
+// ES: Administra el proceso C++ y su estado compartido. / EN: Manages the C++ process and its shared state.
 pub struct SidecarManager {
-    /// Handle to the running child process (None when stopped).
     child: Arc<Mutex<Option<CommandChild>>>,
 
-    /// Channel sender for forwarding JSON command strings to the writer task.
     tx_cmd: Option<UnboundedSender<String>>,
 
-    /// `true` while the background reader/writer tasks are alive.
     pub running: Arc<AtomicBool>,
 
-    /// `true` while a graceful shutdown has been requested.
     stopping: Arc<AtomicBool>,
 
-    /// Latest stats + interface list, updated from the reader task.
     snapshot: Arc<Mutex<Snapshot>>,
 }
 
@@ -104,8 +73,6 @@ impl SidecarManager {
             snapshot: Arc::new(Mutex::new(Snapshot::default())),
         }
     }
-
-    // ── Accessors used by commands.rs ─────────────────────────────────────
 
     pub fn get_stats(&self) -> Stats {
         self.snapshot
@@ -125,10 +92,6 @@ impl SidecarManager {
         self.running.load(Ordering::SeqCst)
     }
 
-    // ── Spawn ─────────────────────────────────────────────────────────────
-
-    /// Spawn `sniffer_core` and start background tasks.
-    /// If the sidecar is already running it is stopped first.
     pub fn start(
         &mut self,
         app: AppHandle,
@@ -136,12 +99,10 @@ impl SidecarManager {
         db: Arc<DbManager>,
         active_session_id: Arc<Mutex<Option<i64>>>,
     ) -> Result<(), String> {
-        // Stop any existing session
         if self.is_running() {
             self.stop_inner()?;
         }
 
-        // Spawn the sidecar binary
         let (mut rx_evt, child) = app
             .shell()
             .sidecar("sniffer_core")
@@ -149,7 +110,6 @@ impl SidecarManager {
             .spawn()
             .map_err(|e| format!("sidecar spawn failed: {e}"))?;
 
-        // Unbounded channel: commands → stdin writer task
         let (tx_cmd, mut rx_cmd) = mpsc::unbounded_channel::<String>();
 
         *self.child.lock().map_err(|e| e.to_string())? = Some(child);
@@ -165,7 +125,8 @@ impl SidecarManager {
         let session_r = Arc::clone(&active_session_id);
         let app_r = app.clone();
 
-        // ── Reader task: stdout lines → Tauri events ─────────────────────
+        // ES: Convierte stdout JSONL en eventos Tauri y persistencia SQLite.
+        // EN: Converts JSONL stdout into Tauri events and SQLite persistence.
         tauri::async_runtime::spawn(async move {
             while let Some(event) = rx_evt.recv().await {
                 match event {
@@ -207,7 +168,6 @@ impl SidecarManager {
                         break;
                     }
 
-                    // Exhaustive match — tauri_plugin_shell may add variants
                     _ => {}
                 }
             }
@@ -215,16 +175,10 @@ impl SidecarManager {
             close_active_session(&db_r, &session_r);
             let _ = app_r.emit("capture_state", json!({ "running": false }));
         });
-
-        // ── Writer task: rx_cmd → stdin ───────────────────────────────────
-        // `tauri_plugin_shell` CommandChild is not Send, so we write via
-        // the channel on the same thread that owns the child.  We use a
-        // dedicated blocking thread for this.
-        //
-        // NOTE: `write()` on CommandChild is synchronous; we run it in a
-        // `spawn_blocking` wrapper so we don't block the async executor.
         let child_ref_w = Arc::clone(&self.child);
 
+        // ES: write() es sincrono; spawn_blocking evita bloquear el ejecutor asincrono.
+        // EN: write() is synchronous; spawn_blocking keeps the async executor responsive.
         tauri::async_runtime::spawn(async move {
             while let Some(cmd_str) = rx_cmd.recv().await {
                 let mut line = cmd_str;
@@ -254,16 +208,12 @@ impl SidecarManager {
             running_w.store(false, Ordering::SeqCst);
         });
 
-        // Send the initial "start" command
         let start_cmd = json!({ "cmd": "start", "interface_id": interface_id });
         self.send_json(&start_cmd)?;
 
         Ok(())
     }
 
-    // ── Command helpers ───────────────────────────────────────────────────
-
-    /// Serialize `value` and push it through the stdin channel.
     pub fn send_json(&self, value: &Value) -> Result<(), String> {
         let tx = self
             .tx_cmd
@@ -274,20 +224,14 @@ impl SidecarManager {
             .map_err(|e| format!("send_json channel error: {e}"))
     }
 
-    /// Ask the sidecar to apply a BPF filter.
     pub fn set_filter(&self, bpf: &str) -> Result<(), String> {
         self.send_json(&json!({ "cmd": "set_filter", "bpf": bpf }))
     }
 
-    /// Ask the sidecar to list interfaces (response comes as an event).
     pub fn list_interfaces(&self) -> Result<(), String> {
         self.send_json(&json!({ "cmd": "list_interfaces" }))
     }
 
-    // ── Stop ──────────────────────────────────────────────────────────────
-
-    /// Graceful stop: send `{"cmd":"stop"}`, wait 500 ms, then the
-    /// background tasks clean up when they detect the process exited.
     pub fn stop(&mut self) -> Result<(), String> {
         self.stop_inner()
     }
@@ -299,16 +243,10 @@ impl SidecarManager {
 
         self.stopping.store(true, Ordering::SeqCst);
 
-        // Best-effort: send stop command
         let _ = self.send_json(&json!({ "cmd": "stop" }));
 
-        // Drop the sender; this closes the stdin pipe and causes the
-        // writer task to exit, which in turn terminates the process.
         self.tx_cmd = None;
 
-        // Give the process a moment to exit gracefully before we return.
-        // The reader task will flip `running` to false when it detects
-        // the Terminated event.
         std::thread::sleep(Duration::from_millis(500));
         if let Some(child) = self.child.lock().map_err(|e| e.to_string())?.take() {
             let _ = child.kill();
@@ -318,8 +256,7 @@ impl SidecarManager {
         Ok(())
     }
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
+// ES: Cierra la sesion aunque el sidecar termine inesperadamente. / EN: Closes the session even if the sidecar exits unexpectedly.
 fn close_active_session(db: &DbManager, active_session_id: &Mutex<Option<i64>>) {
     let session_id = active_session_id.lock().ok().and_then(|mut id| id.take());
     if let Some(session_id) = session_id {
@@ -333,9 +270,7 @@ fn close_active_session(db: &DbManager, active_session_id: &Mutex<Option<i64>>) 
     }
 }
 
-// stdout line dispatcher
-// ─────────────────────────────────────────────────────────────────────────────
-
+// ES: Distribuye cada linea JSONL segun su tipo. / EN: Dispatches each JSONL line according to its type.
 fn handle_stdout_line(
     text: &str,
     app: &AppHandle,
@@ -354,10 +289,7 @@ fn handle_stdout_line(
     let msg_type = value.get("type").and_then(Value::as_str).unwrap_or("");
 
     match msg_type {
-        // ── Packet (no "type" field) ──────────────────────────────────
         "" | "packet" => emit_packet(app, &value, db, active_session_id),
-
-        // ── Ready / interface list ────────────────────────────────────
         "ready" | "interfaces" => {
             if let Some(arr) = value.get("interfaces").and_then(Value::as_array) {
                 let ifaces: Vec<Interface> = arr
@@ -371,8 +303,6 @@ fn handle_stdout_line(
                 let _ = app.emit("interfaces", &ifaces);
             }
         }
-
-        // ── Stats ─────────────────────────────────────────────────────
         "stats" => {
             if let Ok(stats) = serde_json::from_value::<Stats>(value.clone()) {
                 if let Ok(mut snap) = snapshot.lock() {
@@ -381,8 +311,6 @@ fn handle_stdout_line(
                 let _ = app.emit("net_stats", &stats);
             }
         }
-
-        // ── Error ─────────────────────────────────────────────────────
         "error" => {
             let msg = value
                 .get("msg")
@@ -391,8 +319,6 @@ fn handle_stdout_line(
             eprintln!("[sniffer_core error] {msg}");
             let _ = app.emit("sniffer_error", json!({ "msg": msg }));
         }
-
-        // ── Info / ack (ignored or logged) ────────────────────────────
         "info" => {
             let msg = value.get("msg").and_then(Value::as_str).unwrap_or("");
             eprintln!("[sniffer_core info] {msg}");
@@ -404,15 +330,12 @@ fn handle_stdout_line(
     }
 }
 
-/// Parse a raw JSON value as a `Packet` and emit it.
-/// Packets have no `"type"` field — they are identified by having `"id"`.
 fn emit_packet(
     app: &AppHandle,
     value: &Value,
     db: &Arc<DbManager>,
     active_session_id: &Arc<Mutex<Option<i64>>>,
 ) {
-    // Must have an "id" to be considered a packet
     if value.get("id").is_none() {
         return;
     }
@@ -444,7 +367,6 @@ fn emit_packet(
         }
         Err(e) => {
             eprintln!("[sniffer_core] packet deserialize error: {e}");
-            // Fallback: emit raw value so the frontend at least receives it
             let _ = app.emit("packet_raw", value);
         }
     }

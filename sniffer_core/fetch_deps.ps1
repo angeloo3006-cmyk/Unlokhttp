@@ -1,4 +1,4 @@
-# Downloads nlohmann/json single-header into sniffer_core.
+# ES: Descarga la cabecera unica nlohmann/json en sniffer_core. / EN: Downloads the nlohmann/json single header into sniffer_core.
 $version = "3.12.0"
 $dest = Join-Path $PSScriptRoot "json.hpp"
 $url = "https://github.com/nlohmann/json/releases/download/v$version/json.hpp"

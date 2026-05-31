@@ -1,4 +1,4 @@
-# Downloads the public Npcap SDK into the workspace cache.
+# ES: Descarga el SDK publico de Npcap en la cache local. / EN: Downloads the public Npcap SDK into the local cache.
 $version = "1.16"
 $vendorDir = Join-Path $PSScriptRoot "vendor"
 $dest = Join-Path $vendorDir "npcap-sdk"

@@ -1,16 +1,12 @@
 /**
  * tauri.ts
  *
- * Strongly-typed wrappers around `invoke()` and `listen()` for every
- * Rust command and event exposed by netscope's backend.
+ * ES: Wrappers tipados para los comandos y eventos expuestos por Rust.
+ * EN: Typed wrappers for commands and events exposed by Rust.
  */
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Primitive / shared types
-// ─────────────────────────────────────────────────────────────────────────────
 
 export type Protocol =
   | "TCP" | "UDP" | "ICMP" | "ARP"
@@ -19,13 +15,9 @@ export type Protocol =
 export type TcpFlags =
   | "SYN" | "ACK" | "FIN" | "RST" | "PSH" | "SYN-ACK" | "";
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Sniffer / live-capture types
-// ─────────────────────────────────────────────────────────────────────────────
-
 export interface Packet {
   id:          number;
-  ts:          string;         // ISO-8601 with ms
+  ts:          string;         // ES: ISO-8601 con ms. / EN: ISO-8601 with ms.
   src_ip:      string | null;
   dst_ip:      string | null;
   src_port:    number | null;
@@ -66,10 +58,6 @@ export interface SnifferError {
   msg: string;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// DB types (mirror Rust structs in db.rs)
-// ─────────────────────────────────────────────────────────────────────────────
-
 export interface Session {
   id:            number;
   name:          string | null;
@@ -79,7 +67,7 @@ export interface Session {
   total_packets: number;
 }
 
-/** Mirror of `PacketRow` — used for DB reads and the persist_packet command. */
+/** ES: Refleja PacketRow para lecturas DB y persist_packet. / EN: Mirrors PacketRow for DB reads and persist_packet. */
 export interface PacketRow {
   id:          number;
   session_id:  number;
@@ -96,7 +84,7 @@ export interface PacketRow {
   raw_ascii:   string | null;
 }
 
-/** All-optional filter bag passed to `queryPackets`. */
+/** ES: Filtros opcionales enviados a queryPackets. / EN: Optional filters passed to queryPackets. */
 export interface PacketFilters {
   src_ip?:     string;
   dst_ip?:     string;
@@ -105,7 +93,7 @@ export interface PacketFilters {
   protocol?:   string;
   min_length?: number;
   max_length?: number;
-  /** Free-text search across IPs and protocol. */
+  /** ES: Busqueda libre por IP y protocolo. / EN: Free-text search across IPs and protocol. */
   search?:     string;
 }
 
@@ -117,15 +105,13 @@ export interface PaginatedResult<T> {
   total_pages: number;
 }
 
-// ── Diagnostics / analytics ──────────────────────────────────────────────────
-
 export interface ProtocolStat {
   protocol: string;
   count:    number;
 }
 
 export interface TimePoint {
-  bucket:  string;   // ISO-8601 bucket start
+  bucket:  string;   // ES: Inicio del bloque ISO-8601. / EN: ISO-8601 bucket start.
   packets: number;
   bytes:   number;
 }
@@ -155,10 +141,6 @@ export interface DiagnosticsData {
   recent_errors:    DiagnosticRow[];
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Capture lifecycle commands
-// ─────────────────────────────────────────────────────────────────────────────
-
 export interface StartCaptureArgs {
   interfaceId:   number;
   sessionName?:  string;
@@ -166,8 +148,8 @@ export interface StartCaptureArgs {
 }
 
 /**
- * Start packet capture on the given interface.
- * Returns the new DB session id.
+ * ES: Inicia captura y devuelve el id de la nueva sesion DB.
+ * EN: Starts capture and returns the new DB session id.
  */
 export async function startCapture(args: StartCaptureArgs): Promise<number> {
   return invoke("start_capture", {
@@ -179,62 +161,50 @@ export async function startCapture(args: StartCaptureArgs): Promise<number> {
   });
 }
 
-/** Stop an active capture session. Idempotent. */
+/** ES: Detiene la captura activa; es idempotente. / EN: Stops active capture; idempotent. */
 export async function stopCapture(): Promise<void> {
   return invoke("stop_capture");
 }
 
-/** Restart capture on a different interface without creating a new session. */
+/** ES: Cambia de interfaz sin crear sesion. / EN: Changes interface without creating a session. */
 export async function setInterface(interfaceId: number): Promise<void> {
   return invoke("set_interface", { interfaceId });
 }
 
-/** Apply a BPF filter expression to the running capture. */
+/** ES: Aplica un filtro BPF. / EN: Applies a BPF filter. */
 export async function setBpfFilter(filter: string): Promise<void> {
   return invoke("set_bpf_filter", { filter });
 }
 
-/** Return available network interfaces. */
+/** ES: Devuelve interfaces disponibles. / EN: Returns available interfaces. */
 export async function listInterfaces(): Promise<ListInterfacesResponse> {
   return invoke("list_interfaces");
 }
 
-/** Pull-based stats snapshot. */
+/** ES: Obtiene un snapshot de estadisticas. / EN: Retrieves a stats snapshot. */
 export async function getStats(): Promise<Stats> {
   return invoke("get_stats");
 }
 
-/** Check whether the sidecar is currently capturing. */
+/** ES: Comprueba si el sidecar captura. / EN: Checks whether the sidecar is capturing. */
 export async function captureStatus(): Promise<CaptureStatusResponse> {
   return invoke("capture_status");
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Session management commands
-// ─────────────────────────────────────────────────────────────────────────────
-
-/** List all recorded sessions, newest first. */
+/** ES: Lista sesiones recientes primero. / EN: Lists sessions newest first. */
 export async function listSessions(): Promise<Session[]> {
   return invoke("list_sessions");
 }
 
-/** Delete a session and all its associated packets. */
+/** ES: Elimina sesion y paquetes asociados. / EN: Deletes a session and its packets. */
 export async function deleteSession(sessionId: number): Promise<void> {
   return invoke("delete_session", { sessionId });
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Packet persistence commands
-// ─────────────────────────────────────────────────────────────────────────────
-
-/** Persist a single packet into the current session. */
+/** ES: Guarda un paquete en la sesion actual. / EN: Persists a packet in the current session. */
 export async function persistPacket(packet: PacketRow): Promise<void> {
   return invoke("persist_packet", { packet });
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Packet query commands
-// ─────────────────────────────────────────────────────────────────────────────
 
 export interface QueryPacketsArgs {
   sessionId: number;
@@ -244,7 +214,7 @@ export interface QueryPacketsArgs {
 }
 
 /**
- * Paginated, filtered packet query.
+ * ES: Consulta paginada con filtros. / EN: Paginated filtered query.
  *
  * @example
  * const result = await queryPackets({
@@ -268,8 +238,8 @@ export async function queryPackets(
 }
 
 /**
- * Export all packets matching `filters` as a raw JSON string.
- * Useful for "Save capture" / CSV export flows.
+ * ES: Exporta paquetes filtrados como JSON para guardado o CSV.
+ * EN: Exports filtered packets as JSON for save or CSV flows.
  */
 export async function exportPacketsJson(
   sessionId: number,
@@ -281,15 +251,9 @@ export async function exportPacketsJson(
   });
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Diagnostics / analytics commands
-// ─────────────────────────────────────────────────────────────────────────────
-
 /**
- * Return the full analytics bundle for a session.
- *
- * Includes: protocol distribution, 5-second traffic timeline, top IPs,
- * byte totals, average packet size, and recent diagnostic rows.
+ * ES: Devuelve analitica completa de una sesion.
+ * EN: Returns the full analytics bundle for a session.
  */
 export async function getDiagnosticsData(
   sessionId: number,
@@ -297,7 +261,7 @@ export async function getDiagnosticsData(
   return invoke("get_diagnostics_data", { sessionId });
 }
 
-/** Record a named metric value into the diagnostics table. */
+/** ES: Guarda una metrica en diagnosticos. / EN: Stores a diagnostics metric. */
 export async function recordDiagnostic(
   sessionId: number,
   metric:    string,
@@ -306,33 +270,29 @@ export async function recordDiagnostic(
   return invoke("record_diagnostic", { sessionId, metric, value });
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Real-time event subscriptions
-// ─────────────────────────────────────────────────────────────────────────────
-
-/** Called for every captured packet (high-frequency — throttle if needed). */
+/** ES: Se ejecuta por paquete; limitar frecuencia si hace falta. / EN: Runs per packet; throttle if needed. */
 export function onPacket(cb: (pkt: Packet) => void): Promise<UnlistenFn> {
   return listen<Packet>("packet", (e) => cb(e.payload));
 }
 
-/** Raw / undeserializable packet fallback. */
+/** ES: Fallback para paquetes crudos. / EN: Raw packet fallback. */
 export function onPacketRaw(cb: (raw: unknown) => void): Promise<UnlistenFn> {
   return listen<unknown>("packet_raw", (e) => cb(e.payload));
 }
 
-/** Called every second with throughput statistics. */
+/** ES: Recibe estadisticas cada segundo. / EN: Receives stats every second. */
 export function onNetStats(cb: (stats: Stats) => void): Promise<UnlistenFn> {
   return listen<Stats>("net_stats", (e) => cb(e.payload));
 }
 
-/** Called when the sidecar emits or refreshes the interface list. */
+/** ES: Recibe interfaces emitidas o actualizadas. / EN: Receives emitted or refreshed interfaces. */
 export function onInterfaces(
   cb: (interfaces: Interface[]) => void,
 ): Promise<UnlistenFn> {
   return listen<Interface[]>("interfaces", (e) => cb(e.payload));
 }
 
-/** Called on any error from the sidecar or the Rust layer. */
+/** ES: Recibe errores del sidecar o Rust. / EN: Receives sidecar or Rust errors. */
 export function onSnifferError(
   cb: (err: SnifferError) => void,
 ): Promise<UnlistenFn> {

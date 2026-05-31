@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# fetch_deps.sh — downloads nlohmann/json single-header into sniffer_core/
+# ES: Descarga la cabecera unica nlohmann/json en sniffer_core/. / EN: Downloads the nlohmann/json single header into sniffer_core/.
 set -euo pipefail
 
 DEST="$(dirname "$0")/json.hpp"
@@ -7,7 +7,7 @@ VERSION="3.12.0"
 URL="https://github.com/nlohmann/json/releases/download/v${VERSION}/json.hpp"
 
 if [ -f "$DEST" ]; then
-  echo "json.hpp already present — skipping download."
+  echo "json.hpp already present; skipping download."
   exit 0
 fi
 
@@ -21,4 +21,4 @@ else
   exit 1
 fi
 
-echo "Done → $DEST"
+echo "Done: $DEST"

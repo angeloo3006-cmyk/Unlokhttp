@@ -6,7 +6,7 @@
     "module": "ESNext",
     "skipLibCheck": true,
 
-    /* Bundler mode */
+    /* ES: Modo bundler. / EN: Bundler mode. */
     "moduleResolution": "bundler",
     "allowImportingTsExtensions": true,
     "resolveJsonModule": true,
@@ -14,12 +14,12 @@
     "noEmit": true,
     "jsx": "react-jsx",
 
-    /* Paths */
+    /* ES: Rutas. / EN: Paths. */
     "paths": {
       "@/*": ["./src/*"]
     },
 
-    /* Linting */
+    /* ES: Reglas de lint. / EN: Linting rules. */
     "strict": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
