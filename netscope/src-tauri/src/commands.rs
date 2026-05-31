@@ -10,10 +10,7 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
 
-use crate::db::{
-    DbManager, DiagnosticsData, PacketFilters, PacketRow,
-    PaginatedResult, Session,
-};
+use crate::db::{DbManager, DiagnosticsData, PacketFilters, PacketRow, PaginatedResult, Session};
 use crate::sniffer::{Interface, SidecarManager, Stats};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -21,18 +18,18 @@ use crate::sniffer::{Interface, SidecarManager, Stats};
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub struct AppState {
-    pub sniffer:            Mutex<SidecarManager>,
-    pub db:                 Arc<DbManager>,
+    pub sniffer: Mutex<SidecarManager>,
+    pub db: Arc<DbManager>,
     /// Active session id (set on start_capture, cleared on stop_capture).
-    pub active_session_id:  Mutex<Option<i64>>,
+    pub active_session_id: Arc<Mutex<Option<i64>>>,
 }
 
 impl AppState {
     pub fn new(db: Arc<DbManager>) -> Self {
         Self {
-            sniffer:           Mutex::new(SidecarManager::new()),
+            sniffer: Mutex::new(SidecarManager::new()),
             db,
-            active_session_id: Mutex::new(None),
+            active_session_id: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -43,9 +40,7 @@ impl AppState {
 
 macro_rules! lock {
     ($mutex:expr) => {
-        $mutex
-            .lock()
-            .map_err(|e| format!("mutex poisoned: {e}"))
+        $mutex.lock().map_err(|e| format!("mutex poisoned: {e}"))
     };
 }
 
@@ -56,9 +51,9 @@ macro_rules! lock {
 /// Parameters accepted by `start_capture`.
 #[derive(Debug, Deserialize)]
 pub struct StartCaptureArgs {
-    pub interface_id:   u32,
+    pub interface_id: u32,
     /// Human-readable session label (optional, defaults to interface name).
-    pub session_name:   Option<String>,
+    pub session_name: Option<String>,
     /// Interface name string for DB storage (e.g. "eth0").
     pub interface_name: Option<String>,
 }
@@ -74,8 +69,8 @@ pub struct StartCaptureArgs {
 /// ```
 #[tauri::command]
 pub fn start_capture(
-    args:  StartCaptureArgs,
-    app:   AppHandle,
+    args: StartCaptureArgs,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<i64, String> {
     let mut sniffer = lock!(state.sniffer)?;
@@ -87,17 +82,21 @@ pub fn start_capture(
     // Create a DB session before spawning so the session_id is known.
     let session_id = state
         .db
-        .create_session(
-            args.session_name.as_deref(),
-            args.interface_name.as_deref(),
-        )
+        .create_session(args.session_name.as_deref(), args.interface_name.as_deref())
         .map_err(|e| format!("create_session failed: {e}"))?;
 
     *lock!(state.active_session_id)? = Some(session_id);
 
-    sniffer
-        .start(app, args.interface_id)
-        .map_err(|e| format!("start_capture failed: {e}"))?;
+    if let Err(error) = sniffer.start(
+        app,
+        args.interface_id,
+        Arc::clone(&state.db),
+        Arc::clone(&state.active_session_id),
+    ) {
+        *lock!(state.active_session_id)? = None;
+        let _ = state.db.delete_session(session_id);
+        return Err(format!("start_capture failed: {error}"));
+    }
 
     Ok(session_id)
 }
@@ -111,13 +110,11 @@ pub fn start_capture(
 pub fn stop_capture(state: State<'_, AppState>) -> Result<(), String> {
     let mut sniffer = lock!(state.sniffer)?;
 
-    if !sniffer.is_running() {
-        return Ok(());
+    if sniffer.is_running() {
+        sniffer
+            .stop()
+            .map_err(|e| format!("stop_capture failed: {e}"))?;
     }
-
-    sniffer
-        .stop()
-        .map_err(|e| format!("stop_capture failed: {e}"))?;
 
     // Close DB session
     let session_id = lock!(state.active_session_id)?.take();
@@ -142,22 +139,13 @@ pub fn stop_capture(state: State<'_, AppState>) -> Result<(), String> {
 /// await invoke('set_interface', { interfaceId: 2 });
 /// ```
 #[tauri::command]
-pub fn set_interface(
-    interface_id: u32,
-    app:   AppHandle,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
-    let mut sniffer = lock!(state.sniffer)?;
-
+pub fn set_interface(interface_id: u32, state: State<'_, AppState>) -> Result<(), String> {
+    let sniffer = lock!(state.sniffer)?;
     if sniffer.is_running() {
-        sniffer
-            .stop()
-            .map_err(|e| format!("set_interface/stop: {e}"))?;
+        return Err("Stop capture before changing the interface.".into());
     }
-
-    sniffer
-        .start(app, interface_id)
-        .map_err(|e| format!("set_interface/start: {e}"))
+    let _ = interface_id;
+    Ok(())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -170,10 +158,7 @@ pub fn set_interface(
 /// await invoke('set_bpf_filter', { filter: 'tcp port 443' });
 /// ```
 #[tauri::command]
-pub fn set_bpf_filter(
-    filter: String,
-    state:  State<'_, AppState>,
-) -> Result<(), String> {
+pub fn set_bpf_filter(filter: String, state: State<'_, AppState>) -> Result<(), String> {
     let sniffer = lock!(state.sniffer)?;
 
     if !sniffer.is_running() {
@@ -192,7 +177,7 @@ pub fn set_bpf_filter(
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ListInterfacesResponse {
     pub interfaces: Vec<Interface>,
-    pub refreshed:  bool,
+    pub refreshed: bool,
 }
 
 /// Return available network interfaces (cached + async refresh if running).
@@ -241,13 +226,13 @@ pub fn get_stats(state: State<'_, AppState>) -> Result<Stats, String> {
 /// ```
 #[derive(Debug, Serialize)]
 pub struct CaptureStatusResponse {
-    pub running:    bool,
+    pub running: bool,
     pub session_id: Option<i64>,
 }
 
 #[tauri::command]
 pub fn capture_status(state: State<'_, AppState>) -> Result<CaptureStatusResponse, String> {
-    let sniffer    = lock!(state.sniffer)?;
+    let sniffer = lock!(state.sniffer)?;
     let session_id = lock!(state.active_session_id)?.clone();
     Ok(CaptureStatusResponse {
         running: sniffer.is_running(),
@@ -275,10 +260,7 @@ pub fn list_sessions(state: State<'_, AppState>) -> Result<Vec<Session>, String>
 /// await invoke('delete_session', { sessionId: 3 });
 /// ```
 #[tauri::command]
-pub fn delete_session(
-    session_id: i64,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
+pub fn delete_session(session_id: i64, state: State<'_, AppState>) -> Result<(), String> {
     // Refuse to delete the currently active session
     let active = lock!(state.active_session_id)?.clone();
     if active == Some(session_id) {
@@ -301,12 +283,9 @@ pub fn delete_session(
 /// await invoke('persist_packet', { packet: { ... } });
 /// ```
 #[tauri::command]
-pub fn persist_packet(
-    packet: PacketRow,
-    state:  State<'_, AppState>,
-) -> Result<(), String> {
-    let session_id = lock!(state.active_session_id)?
-        .ok_or_else(|| "No active session".to_string())?;
+pub fn persist_packet(packet: PacketRow, state: State<'_, AppState>) -> Result<(), String> {
+    let session_id =
+        lock!(state.active_session_id)?.ok_or_else(|| "No active session".to_string())?;
 
     state
         .db
@@ -322,9 +301,9 @@ pub fn persist_packet(
 #[derive(Debug, Deserialize)]
 pub struct QueryPacketsArgs {
     pub session_id: i64,
-    pub filters:    PacketFilters,
-    pub page:       u32,
-    pub page_size:  u32,
+    pub filters: PacketFilters,
+    pub page: u32,
+    pub page_size: u32,
 }
 
 /// Paginated, filtered packet query.
@@ -342,15 +321,12 @@ pub struct QueryPacketsArgs {
 /// ```
 #[tauri::command]
 pub fn query_packets(
-    args:  QueryPacketsArgs,
+    args: QueryPacketsArgs,
     state: State<'_, AppState>,
 ) -> Result<PaginatedResult<PacketRow>, String> {
-    state.db.get_packets_paginated(
-        args.session_id,
-        &args.filters,
-        args.page,
-        args.page_size,
-    )
+    state
+        .db
+        .get_packets_paginated(args.session_id, &args.filters, args.page, args.page_size)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -388,9 +364,9 @@ pub fn get_diagnostics_data(
 #[tauri::command]
 pub fn record_diagnostic(
     session_id: i64,
-    metric:     String,
-    value:      f64,
-    state:      State<'_, AppState>,
+    metric: String,
+    value: f64,
+    state: State<'_, AppState>,
 ) -> Result<(), String> {
     state
         .db
@@ -408,8 +384,8 @@ pub fn record_diagnostic(
 #[tauri::command]
 pub fn export_packets_json(
     session_id: i64,
-    filters:    Option<PacketFilters>,
-    state:      State<'_, AppState>,
+    filters: Option<PacketFilters>,
+    state: State<'_, AppState>,
 ) -> Result<String, String> {
     let f = filters.unwrap_or_default();
     let rows = state
@@ -417,6 +393,5 @@ pub fn export_packets_json(
         .get_packets(session_id, &f)
         .map_err(|e| format!("export_packets_json/get: {e}"))?;
 
-    serde_json::to_string(&rows)
-        .map_err(|e| format!("export_packets_json/serialize: {e}"))
+    serde_json::to_string(&rows).map_err(|e| format!("export_packets_json/serialize: {e}"))
 }

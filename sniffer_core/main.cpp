@@ -17,10 +17,14 @@
 #  define WIN32_LEAN_AND_MEAN
 #  define NOMINMAX
 #  include <windows.h>
+#  include <fcntl.h>
+#  include <io.h>
    // Npcap SDK ships the same pcap.h interface
 #  include <pcap/pcap.h>
-#  pragma comment(lib, "wpcap.lib")
-#  pragma comment(lib, "ws2_32.lib")
+#  ifdef _MSC_VER
+#    pragma comment(lib, "wpcap.lib")
+#    pragma comment(lib, "ws2_32.lib")
+#  endif
    // inet_ntop / ntohs shim for older MSVC
 #  include <ws2tcpip.h>
 #  ifndef INET_ADDRSTRLEN
@@ -427,6 +431,9 @@ static void packet_handler(u_char* /*user*/,
             out["protocol"] = "TCP";
 
         uint8_t tcp_off = (tcp->data_off >> 4) * 4;
+        if (tcp_off < sizeof(TcpHeader) || tcp_off > l4_len) {
+            tcp_off = sizeof(TcpHeader);
+        }
         const uint8_t* payload = l4 + tcp_off;
         uint32_t payload_len = (l4_len > tcp_off) ? l4_len - tcp_off : 0;
         out["payload_hex"] = bytes_to_hex(payload, payload_len);
@@ -497,21 +504,14 @@ static void stats_loop() {
 // ────────────────────────────────────────────────────────────────────────────
 // Start capture on given interface id
 // ────────────────────────────────────────────────────────────────────────────
-static bool do_start(int iface_id) {
-    std::lock_guard<std::mutex> lk(g::capture_mtx);
+static void do_stop();
 
-    if (g::running.load()) {
-        // Already running: break existing loop, close handle
-        pcap_breakloop(g::handle);
-        if (g::capture_thread.joinable()) {
-            g::capture_mtx.unlock();
-            g::capture_thread.join();
-            g::capture_mtx.lock();
-        }
-        pcap_close(g::handle);
-        g::handle  = nullptr;
-        g::running = false;
-    }
+static bool do_start(int iface_id) {
+    // Stop any prior loop before locking for the new handle. Joining while
+    // holding capture_mtx would deadlock with capture_loop.
+    do_stop();
+
+    std::lock_guard<std::mutex> lk(g::capture_mtx);
 
     std::string name = iface_name_by_id(iface_id);
     if (name.empty()) {
@@ -612,7 +612,8 @@ static void stdin_loop() {
         if (c == "start") {
             int iface_id = cmd.value("interface_id", 0);
             if (!do_start(iface_id)) {
-                // error already emitted inside do_start
+                // Let Rust observe process termination and close the session.
+                return;
             } else {
                 emit({ {"type","info"}, {"msg","capture started"},
                        {"interface_id", iface_id} });

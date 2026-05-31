@@ -3,7 +3,7 @@
 set -euo pipefail
 
 DEST="$(dirname "$0")/json.hpp"
-VERSION="3.11.3"
+VERSION="3.12.0"
 URL="https://github.com/nlohmann/json/releases/download/v${VERSION}/json.hpp"
 
 if [ -f "$DEST" ]; then

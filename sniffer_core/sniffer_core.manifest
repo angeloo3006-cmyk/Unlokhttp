@@ -9,8 +9,8 @@
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
     <security>
       <requestedPrivileges>
-        <!-- requireAdministrator: raw socket access on Windows needs elevation -->
-        <requestedExecutionLevel level="requireAdministrator" uiAccess="false"/>
+        <!-- Npcap controls whether standard users may capture traffic. -->
+        <requestedExecutionLevel level="asInvoker" uiAccess="false"/>
       </requestedPrivileges>
     </security>
   </trustInfo>

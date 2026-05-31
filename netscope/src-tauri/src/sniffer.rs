@@ -8,8 +8,8 @@
 //!  • Parse every stdout line and emit typed Tauri events to the frontend.
 //!  • Maintain an in-memory snapshot of the last stats and interface list.
 
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -19,6 +19,8 @@ use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
 use tokio::sync::mpsc::{self, UnboundedSender};
 
+use crate::db::{DbManager, PacketRow};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Public data types (also used in commands.rs)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -26,18 +28,18 @@ use tokio::sync::mpsc::{self, UnboundedSender};
 /// One network interface returned by the sidecar on startup or `list_interfaces`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Interface {
-    pub id:       u32,
-    pub name:     String,
-    pub desc:     String,
+    pub id: u32,
+    pub name: String,
+    pub desc: String,
     pub loopback: bool,
-    pub up:       bool,
+    pub up: bool,
 }
 
 /// Throughput / drop statistics snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Stats {
     pub captured: u64,
-    pub dropped:  u64,
+    pub dropped: u64,
     pub rate_pps: f64,
 }
 
@@ -45,18 +47,18 @@ pub struct Stats {
 /// All fields mirror the sidecar's JSON schema.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Packet {
-    pub id:          u64,
-    pub ts:          String,
-    pub src_ip:      Option<String>,
-    pub dst_ip:      Option<String>,
-    pub src_port:    Option<u16>,
-    pub dst_port:    Option<u16>,
-    pub protocol:    String,
-    pub length:      u32,
-    pub ttl:         Option<u8>,
-    pub flags:       String,
+    pub id: u64,
+    pub ts: String,
+    pub src_ip: Option<String>,
+    pub dst_ip: Option<String>,
+    pub src_port: Option<u16>,
+    pub dst_port: Option<u16>,
+    pub protocol: String,
+    pub length: u32,
+    pub ttl: Option<u8>,
+    pub flags: String,
     pub payload_hex: String,
-    pub raw_ascii:   String,
+    pub raw_ascii: String,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -66,7 +68,7 @@ pub struct Packet {
 /// Shared snapshot kept inside `SidecarManager`.
 #[derive(Debug, Default)]
 struct Snapshot {
-    stats:      Stats,
+    stats: Stats,
     interfaces: Vec<Interface>,
 }
 
@@ -77,13 +79,16 @@ struct Snapshot {
 /// Top-level manager held in Tauri's `State<Mutex<SidecarManager>>`.
 pub struct SidecarManager {
     /// Handle to the running child process (None when stopped).
-    child: Option<CommandChild>,
+    child: Arc<Mutex<Option<CommandChild>>>,
 
     /// Channel sender for forwarding JSON command strings to the writer task.
     tx_cmd: Option<UnboundedSender<String>>,
 
     /// `true` while the background reader/writer tasks are alive.
     pub running: Arc<AtomicBool>,
+
+    /// `true` while a graceful shutdown has been requested.
+    stopping: Arc<AtomicBool>,
 
     /// Latest stats + interface list, updated from the reader task.
     snapshot: Arc<Mutex<Snapshot>>,
@@ -92,9 +97,10 @@ pub struct SidecarManager {
 impl SidecarManager {
     pub fn new() -> Self {
         Self {
-            child:    None,
-            tx_cmd:   None,
-            running:  Arc::new(AtomicBool::new(false)),
+            child: Arc::new(Mutex::new(None)),
+            tx_cmd: None,
+            running: Arc::new(AtomicBool::new(false)),
+            stopping: Arc::new(AtomicBool::new(false)),
             snapshot: Arc::new(Mutex::new(Snapshot::default())),
         }
     }
@@ -127,6 +133,8 @@ impl SidecarManager {
         &mut self,
         app: AppHandle,
         interface_id: u32,
+        db: Arc<DbManager>,
+        active_session_id: Arc<Mutex<Option<i64>>>,
     ) -> Result<(), String> {
         // Stop any existing session
         if self.is_running() {
@@ -144,27 +152,33 @@ impl SidecarManager {
         // Unbounded channel: commands → stdin writer task
         let (tx_cmd, mut rx_cmd) = mpsc::unbounded_channel::<String>();
 
-        self.child   = Some(child);
-        self.tx_cmd  = Some(tx_cmd.clone());
+        *self.child.lock().map_err(|e| e.to_string())? = Some(child);
+        self.tx_cmd = Some(tx_cmd.clone());
         self.running.store(true, Ordering::SeqCst);
+        self.stopping.store(false, Ordering::SeqCst);
 
-        let running_r   = Arc::clone(&self.running);
-        let running_w   = Arc::clone(&self.running);
-        let snapshot    = Arc::clone(&self.snapshot);
-        let app_r       = app.clone();
+        let running_r = Arc::clone(&self.running);
+        let running_w = Arc::clone(&self.running);
+        let stopping_r = Arc::clone(&self.stopping);
+        let snapshot = Arc::clone(&self.snapshot);
+        let db_r = Arc::clone(&db);
+        let session_r = Arc::clone(&active_session_id);
+        let app_r = app.clone();
 
         // ── Reader task: stdout lines → Tauri events ─────────────────────
-        tokio::spawn(async move {
+        tauri::async_runtime::spawn(async move {
             while let Some(event) = rx_evt.recv().await {
                 match event {
                     CommandEvent::Stdout(line) => {
                         let text = match String::from_utf8(line) {
-                            Ok(t)  => t.trim().to_owned(),
+                            Ok(t) => t.trim().to_owned(),
                             Err(_) => continue,
                         };
-                        if text.is_empty() { continue; }
+                        if text.is_empty() {
+                            continue;
+                        }
 
-                        handle_stdout_line(&text, &app_r, &snapshot);
+                        handle_stdout_line(&text, &app_r, &snapshot, &db_r, &session_r);
                     }
 
                     CommandEvent::Stderr(line) => {
@@ -184,10 +198,12 @@ impl SidecarManager {
                             "[sniffer_core] process terminated: code={:?} signal={:?}",
                             status.code, status.signal
                         );
-                        let _ = app_r.emit(
-                            "sniffer_error",
-                            json!({ "msg": "sniffer_core process terminated unexpectedly" }),
-                        );
+                        if !stopping_r.swap(false, Ordering::SeqCst) {
+                            let _ = app_r.emit(
+                                "sniffer_error",
+                                json!({ "msg": "sniffer_core process terminated unexpectedly" }),
+                            );
+                        }
                         break;
                     }
 
@@ -196,6 +212,8 @@ impl SidecarManager {
                 }
             }
             running_r.store(false, Ordering::SeqCst);
+            close_active_session(&db_r, &session_r);
+            let _ = app_r.emit("capture_state", json!({ "running": false }));
         });
 
         // ── Writer task: rx_cmd → stdin ───────────────────────────────────
@@ -205,20 +223,22 @@ impl SidecarManager {
         //
         // NOTE: `write()` on CommandChild is synchronous; we run it in a
         // `spawn_blocking` wrapper so we don't block the async executor.
-        let child_ref = Arc::new(Mutex::new(
-            self.child.take().expect("child just set above"),
-        ));
-        let child_ref_w = Arc::clone(&child_ref);
+        let child_ref_w = Arc::clone(&self.child);
 
-        tokio::spawn(async move {
+        tauri::async_runtime::spawn(async move {
             while let Some(cmd_str) = rx_cmd.recv().await {
                 let mut line = cmd_str;
-                if !line.ends_with('\n') { line.push('\n'); }
+                if !line.ends_with('\n') {
+                    line.push('\n');
+                }
 
                 let child_clone = Arc::clone(&child_ref_w);
-                let result = tokio::task::spawn_blocking(move || {
+                let result = tauri::async_runtime::spawn_blocking(move || {
                     let mut guard = child_clone.lock().map_err(|e| e.to_string())?;
-                    guard.write(line.as_bytes()).map_err(|e| e.to_string())
+                    let child = guard
+                        .as_mut()
+                        .ok_or_else(|| "sidecar child missing".to_string())?;
+                    child.write(line.as_bytes()).map_err(|e| e.to_string())
                 })
                 .await;
 
@@ -250,7 +270,8 @@ impl SidecarManager {
             .as_ref()
             .ok_or_else(|| "sidecar not running".to_string())?;
         let line = value.to_string();
-        tx.send(line).map_err(|e| format!("send_json channel error: {e}"))
+        tx.send(line)
+            .map_err(|e| format!("send_json channel error: {e}"))
     }
 
     /// Ask the sidecar to apply a BPF filter.
@@ -276,6 +297,8 @@ impl SidecarManager {
             return Ok(());
         }
 
+        self.stopping.store(true, Ordering::SeqCst);
+
         // Best-effort: send stop command
         let _ = self.send_json(&json!({ "cmd": "stop" }));
 
@@ -287,6 +310,9 @@ impl SidecarManager {
         // The reader task will flip `running` to false when it detects
         // the Terminated event.
         std::thread::sleep(Duration::from_millis(500));
+        if let Some(child) = self.child.lock().map_err(|e| e.to_string())?.take() {
+            let _ = child.kill();
+        }
         self.running.store(false, Ordering::SeqCst);
 
         Ok(())
@@ -294,16 +320,31 @@ impl SidecarManager {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+fn close_active_session(db: &DbManager, active_session_id: &Mutex<Option<i64>>) {
+    let session_id = active_session_id.lock().ok().and_then(|mut id| id.take());
+    if let Some(session_id) = session_id {
+        let total = db
+            .get_session_summary(session_id)
+            .map(|(count, _, _)| count)
+            .unwrap_or(0);
+        if let Err(error) = db.close_session(session_id, total) {
+            eprintln!("[sniffer_core] close session error: {error}");
+        }
+    }
+}
+
 // stdout line dispatcher
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn handle_stdout_line(
-    text:     &str,
-    app:      &AppHandle,
+    text: &str,
+    app: &AppHandle,
     snapshot: &Arc<Mutex<Snapshot>>,
+    db: &Arc<DbManager>,
+    active_session_id: &Arc<Mutex<Option<i64>>>,
 ) {
     let value: Value = match serde_json::from_str(text) {
-        Ok(v)  => v,
+        Ok(v) => v,
         Err(e) => {
             eprintln!("[sniffer_core] JSON parse error ({e}): {text}");
             return;
@@ -314,7 +355,7 @@ fn handle_stdout_line(
 
     match msg_type {
         // ── Packet (no "type" field) ──────────────────────────────────
-        "" => emit_packet(app, &value),
+        "" | "packet" => emit_packet(app, &value, db, active_session_id),
 
         // ── Ready / interface list ────────────────────────────────────
         "ready" | "interfaces" => {
@@ -353,10 +394,7 @@ fn handle_stdout_line(
 
         // ── Info / ack (ignored or logged) ────────────────────────────
         "info" => {
-            let msg = value
-                .get("msg")
-                .and_then(Value::as_str)
-                .unwrap_or("");
+            let msg = value.get("msg").and_then(Value::as_str).unwrap_or("");
             eprintln!("[sniffer_core info] {msg}");
         }
 
@@ -368,15 +406,43 @@ fn handle_stdout_line(
 
 /// Parse a raw JSON value as a `Packet` and emit it.
 /// Packets have no `"type"` field — they are identified by having `"id"`.
-fn emit_packet(app: &AppHandle, value: &Value) {
+fn emit_packet(
+    app: &AppHandle,
+    value: &Value,
+    db: &Arc<DbManager>,
+    active_session_id: &Arc<Mutex<Option<i64>>>,
+) {
     // Must have an "id" to be considered a packet
     if value.get("id").is_none() {
         return;
     }
 
     match serde_json::from_value::<Packet>(value.clone()) {
-        Ok(pkt)  => { let _ = app.emit("packet", &pkt); }
-        Err(e)   => {
+        Ok(pkt) => {
+            let _ = app.emit("packet", &pkt);
+            let session_id = active_session_id.lock().ok().and_then(|id| *id);
+            if let Some(session_id) = session_id {
+                let row = PacketRow {
+                    id: pkt.id as i64,
+                    session_id,
+                    ts: pkt.ts.clone(),
+                    src_ip: pkt.src_ip.clone(),
+                    dst_ip: pkt.dst_ip.clone(),
+                    src_port: pkt.src_port.map(i32::from),
+                    dst_port: pkt.dst_port.map(i32::from),
+                    protocol: Some(pkt.protocol.clone()),
+                    length: i32::try_from(pkt.length).ok(),
+                    ttl: pkt.ttl.map(i32::from),
+                    flags: Some(pkt.flags.clone()),
+                    payload_hex: Some(pkt.payload_hex.clone()),
+                    raw_ascii: Some(pkt.raw_ascii.clone()),
+                };
+                if let Err(e) = db.insert_packet(session_id, &row) {
+                    eprintln!("[sniffer_core] packet persistence error: {e}");
+                }
+            }
+        }
+        Err(e) => {
             eprintln!("[sniffer_core] packet deserialize error: {e}");
             // Fallback: emit raw value so the frontend at least receives it
             let _ = app.emit("packet_raw", value);

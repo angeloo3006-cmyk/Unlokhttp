@@ -8,6 +8,10 @@ use std::sync::Arc;
 
 use commands::AppState;
 use tauri::Manager;
+#[cfg(target_os = "windows")]
+use window_vibrancy::apply_acrylic;
+#[cfg(target_os = "macos")]
+use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -30,16 +34,18 @@ pub fn run() {
                 .app_data_dir()
                 .expect("cannot resolve app data dir");
 
-            let db = Arc::new(
-                db::DbManager::new(data_dir)
-                    .expect("failed to open/create netscope.db"),
-            );
+            let db =
+                Arc::new(db::DbManager::new(data_dir).expect("failed to open/create netscope.db"));
 
             // Register combined state (sniffer + db + active session)
             app.manage(AppState::new(db));
 
             // Show the main window (it starts hidden so there's no flash)
             if let Some(win) = app.get_webview_window("main") {
+                #[cfg(target_os = "windows")]
+                let _ = apply_acrylic(&win, Some((18, 18, 18, 125)));
+                #[cfg(target_os = "macos")]
+                let _ = apply_vibrancy(&win, NSVisualEffectMaterial::HudWindow, None, None);
                 let _ = win.show();
             }
 
