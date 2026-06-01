@@ -496,12 +496,19 @@ src/
 
 Instalar:
 
-Node.js y npm
-Rust estable y Cargo
+Git
+Node.js LTS y npm
+Rust estable y Cargo mediante rustup
 CMake
-Ninja o una herramienta de compilacion compatible
+Ninja
 Compilador C++17
-Npcap
+Microsoft Edge WebView2 Runtime
+Npcap: controlador de captura instalado en Windows
+
+El SDK de Npcap no se instala manualmente en el caso normal. El script
+`sniffer_core/build.ps1` lo descarga cuando falta. El instalador de Npcap si
+es necesario porque agrega al sistema el controlador que permite capturar
+paquetes reales.
 
 ### Dependencias del frontend
 
@@ -541,11 +548,102 @@ nlohmann/json en json.hpp
 `json.hpp` es una biblioteca de una sola cabecera. Facilita crear y leer JSON
 sin enlazar otra biblioteca.
 
-## 10. Instalacion y ejecucion en Windows
+## 10. Instalacion en Windows
 
-Desde la raiz del repositorio:
+### Opcion recomendada: instalar herramientas con winget
+
+`winget` es el administrador de paquetes oficial incluido con versiones
+modernas de Windows mediante App Installer. Abrir una terminal PowerShell
+normal y comprobar si esta disponible:
 
 ```powershell
+winget --version
+```
+
+Si el comando existe, instalar las herramientas generales:
+
+```powershell
+winget install --id Git.Git -e --source winget
+winget install --id OpenJS.NodeJS.LTS -e --source winget
+winget install --id Rustlang.Rustup -e --source winget
+winget install --id Kitware.CMake -e --source winget
+winget install --id Ninja-build.Ninja -e --source winget
+winget install --id Microsoft.EdgeWebView2Runtime -e --source winget
+```
+
+NetScope compila el sidecar C++ con CMake. La opcion mas sencilla en Windows
+es instalar Visual Studio Build Tools con la carga de trabajo de C++:
+
+```powershell
+winget install --id Microsoft.VisualStudio.2022.BuildTools -e --source winget --override "--wait --passive --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+```
+
+Despues de instalar Build Tools conviene abrir Visual Studio Installer y
+confirmar que este instalada la carga de trabajo `Desktop development with
+C++`. Cerrar y abrir PowerShell nuevamente para refrescar `PATH`.
+
+Los identificadores anteriores fueron comprobados con `winget` el 1 de junio
+de 2026. Las versiones concretas cambian con el tiempo, por eso no se fijan
+numeros de version en los comandos.
+
+### Instalar Npcap manualmente
+
+Npcap no tenia un paquete oficial disponible mediante `winget` al verificar
+esta guia el 1 de junio de 2026. Debe instalarse manualmente:
+
+1. Abrir [Npcap Downloads](https://npcap.com/#download).
+2. Descargar el instalador estable mas reciente. Al verificar esta guia era
+   Npcap `1.88`.
+3. Ejecutar el instalador.
+4. Si usuarios sin privilegios de administrador deben capturar trafico, no
+   activar la restriccion que limita Npcap solo a administradores.
+
+El SDK publico de Npcap se descarga automaticamente al ejecutar
+`npm run sidecar:build`. Al verificar esta guia, la version publicada del SDK
+era `1.16`.
+
+### Si winget no esta disponible
+
+Descargar los instaladores desde sus sitios oficiales:
+
+| Herramienta | Sitio oficial | Para que se usa |
+|---|---|---|
+| Git | [git-scm.com/install/windows](https://git-scm.com/install/windows) | Clonar y versionar el proyecto |
+| Node.js LTS | [nodejs.org/en/download](https://nodejs.org/en/download) | Ejecutar npm, Vite y React |
+| Rustup | [rustup.rs](https://rustup.rs/) | Instalar Rust y Cargo |
+| Visual Studio Build Tools | [visualstudio.microsoft.com/downloads](https://visualstudio.microsoft.com/downloads/) | Compilar C++ en Windows |
+| CMake | [cmake.org/download](https://cmake.org/download/) | Generar la compilacion del sidecar |
+| Ninja | [github.com/ninja-build/ninja/releases](https://github.com/ninja-build/ninja/releases) | Ejecutar la compilacion generada por CMake |
+| WebView2 Runtime | [developer.microsoft.com/microsoft-edge/webview2](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) | Renderizar la interfaz de Tauri |
+| Npcap | [npcap.com/#download](https://npcap.com/#download) | Capturar paquetes de red |
+
+Si Windows no incluye `winget`, Microsoft documenta App Installer en
+[learn.microsoft.com/windows/package-manager/winget/install](https://learn.microsoft.com/en-us/windows/package-manager/winget/install).
+
+### Verificar las herramientas
+
+Abrir una terminal nueva y ejecutar:
+
+```powershell
+git --version
+node --version
+npm --version
+rustc --version
+cargo --version
+cmake --version
+ninja --version
+```
+
+WebView2 y Npcap no exponen necesariamente un comando de terminal. Se pueden
+comprobar en `Configuracion > Aplicaciones > Aplicaciones instaladas`.
+
+### Descargar y ejecutar NetScope
+
+Clonar la rama de trabajo y entrar al frontend:
+
+```powershell
+git clone -b codex/netscope-scaffold https://github.com/angeloo3006-cmyk/Unlokhttp.git
+cd .\Unlokhttp
 cd .\netscope
 npm install
 npm run sidecar:build
@@ -580,6 +678,16 @@ Tauri usa el binario como sidecar porque `tauri.conf.json` declara:
   }
 }
 ```
+
+### Problemas comunes en Windows
+
+- Si un comando instalado no aparece, cerrar la terminal y abrir una nueva.
+- Si CMake conserva una configuracion antigua, borrar manualmente
+  `sniffer_core/build` y volver a ejecutar `npm run sidecar:build`.
+- Si la aplicacion abre pero no captura, revisar que Npcap este instalado y
+  que su politica permita capturar con el usuario actual.
+- Si falta un compilador C++, abrir Visual Studio Installer y agregar
+  `Desktop development with C++`.
 
 ## 11. Comandos utiles
 
@@ -623,27 +731,143 @@ Generar build debug sin instalador:
 npm run tauri build -- --debug --no-bundle
 ```
 
-## 12. Linux y macOS
+## 12. Instalacion en Linux
 
-El sidecar tambien contempla `libpcap`.
+Tauri usa dependencias nativas del sistema en Linux. Ademas, el sidecar de
+NetScope necesita `libpcap` para capturar paquetes y `libcap` para otorgar
+capacidades al binario sin ejecutar toda la aplicacion como `root`.
 
-Compilar:
+### Ubuntu y Debian
 
 ```bash
+sudo apt update
+sudo apt install -y \
+  libwebkit2gtk-4.1-dev build-essential curl wget file \
+  libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev \
+  libpcap-dev pkg-config libcap2-bin \
+  git nodejs npm cmake ninja-build
+```
+
+### Fedora
+
+```bash
+sudo dnf install -y \
+  webkit2gtk4.1-devel openssl-devel curl wget file \
+  libappindicator-gtk3-devel librsvg2-devel libxdo-devel \
+  libpcap-devel pkgconf-pkg-config libcap \
+  git nodejs npm cmake ninja-build gcc-c++
+```
+
+### Arch Linux
+
+```bash
+sudo pacman -Syu --needed \
+  webkit2gtk-4.1 base-devel curl wget file openssl \
+  appmenu-gtk-module libappindicator-gtk3 librsvg xdotool \
+  libpcap pkgconf libcap \
+  git nodejs npm cmake ninja
+```
+
+### Instalar Rust
+
+En las tres distribuciones, instalar Rust con `rustup`:
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
+rustup default stable
+```
+
+Los repositorios de algunas distribuciones conservan versiones antiguas de
+Node.js. Este proyecto usa Vite `8`, que requiere Node.js `^20.19.0` o
+`>=22.12.0`. Si `node --version` muestra una version inferior, instalar una
+version LTS reciente siguiendo la opcion para Linux de
+[nodejs.org/en/download](https://nodejs.org/en/download).
+
+La lista base de paquetes de interfaz proviene de los
+[prerrequisitos oficiales de Tauri v2](https://v2.tauri.app/start/prerequisites/).
+`libpcap`, `libcap`, CMake y Ninja se agregan porque los necesita el sidecar.
+
+### Verificar las herramientas
+
+```bash
+git --version
+node --version
+npm --version
+rustc --version
+cargo --version
+cmake --version
+ninja --version
+pkg-config --modversion libpcap
+```
+
+### Descargar y ejecutar NetScope
+
+En Linux no se usa `npm run sidecar:build`, porque ese comando llama al script
+PowerShell de Windows. Usar `build.sh`:
+
+```bash
+git clone -b codex/netscope-scaffold https://github.com/angeloo3006-cmyk/Unlokhttp.git
+cd Unlokhttp
+chmod +x sniffer_core/build.sh sniffer_core/fetch_deps.sh
+
 cd sniffer_core
 ./build.sh
+
+sudo setcap cap_net_raw,cap_net_admin=eip build/sniffer_core
+
+cd ../netscope
+npm install
+npm run tauri dev
 ```
 
-En Linux puede ser necesario otorgar capacidades:
+El comando `setcap` permite capturar paquetes sin iniciar toda la interfaz con
+`sudo`. Si el binario vuelve a compilarse o reemplazarse, ejecutar `setcap`
+nuevamente.
+
+### Alternativa manual para Linux
+
+Si la distribucion no usa `apt`, `dnf` o `pacman`, instalar:
+
+```text
+WebKitGTK 4.1 y sus cabeceras de desarrollo
+Compilador C++17 y herramientas de compilacion
+OpenSSL y sus cabeceras
+libpcap y sus cabeceras
+libcap
+pkg-config
+Git
+Node.js LTS y npm
+Rust estable mediante rustup
+CMake
+Ninja
+```
+
+Para distribuir la aplicacion en Linux debe compilarse el sidecar para la
+arquitectura y plataforma objetivo.
+
+## 13. Nota breve para macOS
+
+El sidecar tambien contempla `libpcap` en macOS. Las dependencias principales
+pueden instalarse con Homebrew:
 
 ```bash
-sudo setcap cap_net_raw,cap_net_admin=eip build/sniffer_core
+brew install git node cmake ninja libpcap
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
+
+cd sniffer_core
+./build.sh
+
+cd ../netscope
+npm install
+npm run tauri dev
 ```
 
-Para distribuir la aplicacion en Linux o macOS deben compilarse binarios del
-sidecar especificos para cada plataforma.
+Para distribuir la aplicacion en macOS debe compilarse un sidecar especifico
+para la arquitectura objetivo.
 
-## 13. Flujo al pulsar Start
+## 14. Flujo al pulsar Start
 
 1. React llama start_capture.
 2. Rust crea una sesion SQLite.
@@ -656,7 +880,7 @@ sidecar especificos para cada plataforma.
 9. React actualiza tabla y diagnosticos.
 10. Stop cierra captura y sesion.
 
-## 14. Que se debe editar y que no
+## 15. Que se debe editar y que no
 
 ### Editar normalmente
 
@@ -678,7 +902,7 @@ netscope/src-tauri/target/
 netscope/package-lock.json, salvo cambios de dependencias
 netscope/src-tauri/Cargo.lock, salvo cambios de dependencias
 
-## 15. Diagnosticos heuristicos
+## 16. Diagnosticos heuristicos
 
 NetScope no utiliza actualmente un modelo de inteligencia artificial externo.
 Los diagnosticos son reglas locales y deterministas. Por ejemplo:
@@ -694,7 +918,7 @@ Esto tiene dos ventajas:
 - funciona sin conexion a servicios externos;
 - los resultados son explicables y reproducibles.
 
-## 16. Resumen conceptual
+## 17. Resumen conceptual
 
 NetScope sigue una arquitectura modular:
 
