@@ -7,6 +7,7 @@ import { PacketList } from "@/components/PacketList";
 import { PacketDetail } from "@/components/PacketDetail";
 import { HexViewer } from "@/components/HexViewer";
 import { DiagnosticsView } from "@/views/DiagnosticsView";
+import { SessionsView } from "@/views/SessionsView";
 import { usePacketCapture } from "@/hooks/usePacketCapture";
 import { useFilteredPackets } from "@/hooks/useFilteredPackets";
 import { useFiltersStore } from "@/store/filters";
@@ -56,7 +57,7 @@ export function Layout() {
             </div>
           )}
           {view === "diagnostics" && <DiagnosticsView />}
-          {view === "sessions" && <Placeholder title="Sessions" text="Captured sessions are persisted in netscope.db and ready for the historical browser." />}
+          {view === "sessions" && <SessionsView />}
           {view === "settings" && <Placeholder title="Settings" text="Capture preferences and sidecar configuration live here." />}
         </main>
       </div>
