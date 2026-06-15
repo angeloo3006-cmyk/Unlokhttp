@@ -40,6 +40,11 @@ pub struct Packet {
     pub length: u32,
     pub ttl: Option<u8>,
     pub flags: String,
+    pub link_layer: Option<String>,
+    pub src_mac: Option<String>,
+    pub dst_mac: Option<String>,
+    pub src_vendor: Option<String>,
+    pub dst_vendor: Option<String>,
     pub payload_hex: String,
     pub raw_ascii: String,
 }
@@ -341,7 +346,33 @@ fn emit_packet(
     }
 
     match serde_json::from_value::<Packet>(value.clone()) {
-        Ok(pkt) => {
+        Ok(mut pkt) => {
+            if pkt.src_vendor.is_none() {
+                pkt.src_vendor = pkt
+                    .src_mac
+                    .as_deref()
+                    .and_then(|mac| match db.lookup_vendor_for_mac(mac) {
+                        Ok(vendor) => vendor,
+                        Err(e) => {
+                            eprintln!("[sniffer_core] src OUI lookup error: {e}");
+                            None
+                        }
+                    });
+            }
+
+            if pkt.dst_vendor.is_none() {
+                pkt.dst_vendor = pkt
+                    .dst_mac
+                    .as_deref()
+                    .and_then(|mac| match db.lookup_vendor_for_mac(mac) {
+                        Ok(vendor) => vendor,
+                        Err(e) => {
+                            eprintln!("[sniffer_core] dst OUI lookup error: {e}");
+                            None
+                        }
+                    });
+            }
+
             let _ = app.emit("packet", &pkt);
             let session_id = active_session_id.lock().ok().and_then(|id| *id);
             if let Some(session_id) = session_id {
@@ -357,6 +388,11 @@ fn emit_packet(
                     length: i32::try_from(pkt.length).ok(),
                     ttl: pkt.ttl.map(i32::from),
                     flags: Some(pkt.flags.clone()),
+                    link_layer: pkt.link_layer.clone(),
+                    src_mac: pkt.src_mac.clone(),
+                    dst_mac: pkt.dst_mac.clone(),
+                    src_vendor: pkt.src_vendor.clone(),
+                    dst_vendor: pkt.dst_vendor.clone(),
                     payload_hex: Some(pkt.payload_hex.clone()),
                     raw_ascii: Some(pkt.raw_ascii.clone()),
                 };

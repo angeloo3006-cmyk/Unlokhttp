@@ -1,4 +1,5 @@
 import { AlertCircle, CheckCircle2, Info } from "lucide-react";
+import { useEffect, useState } from "react";
 import {
   CartesianGrid,
   Cell,
@@ -11,9 +12,10 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { usePacketCapture } from "@/hooks/usePacketCapture";
 import { useDiagnostics } from "@/hooks/useDiagnostics";
 import { DiagnosticsCards } from "@/components/DiagnosticsCards";
+import { listSessions, queryPackets, type PacketRow, type Session } from "@/lib/tauri";
+import type { Packet, Protocol } from "@/types/packet";
 
 const COLORS: Record<string, string> = {
   TCP: "#3b82f6",
@@ -27,16 +29,96 @@ const COLORS: Record<string, string> = {
 };
 
 export function DiagnosticsView() {
-  const { packets } = usePacketCapture();
-  const diagnostics = useDiagnostics(packets);
+  const [session, setSession] = useState<Session | null>(null);
+  const [packets, setPackets] = useState<Packet[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const diagnostics = useDiagnostics(packets, {
+    startedAt: session?.started_at,
+    endedAt: session?.ended_at,
+  });
   const maxIpPackets = Math.max(1, ...diagnostics.topIPs.map((ip) => ip.packets));
   const totalProtocols = diagnostics.protocolDist.reduce((sum, item) => sum + item.value, 0);
 
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadPreviousSession() {
+      setLoading(true);
+      setError(null);
+
+      try {
+        const sessions = await listSessions();
+        const previousSession = sessions.find((item) => item.ended_at) ?? sessions[0] ?? null;
+
+        if (!previousSession) {
+          if (!cancelled) {
+            setSession(null);
+            setPackets([]);
+          }
+          return;
+        }
+
+        const firstPage = await queryPackets({
+          sessionId: previousSession.id,
+          filters: {},
+          page: 1,
+          pageSize: 1000,
+        });
+
+        const rows = [...firstPage.items];
+        for (let page = 2; page <= firstPage.total_pages; page += 1) {
+          const nextPage = await queryPackets({
+            sessionId: previousSession.id,
+            filters: {},
+            page,
+            pageSize: 1000,
+          });
+          rows.push(...nextPage.items);
+        }
+
+        rows.sort((a, b) => a.id - b.id);
+
+        if (!cancelled) {
+          setSession(previousSession);
+          setPackets(rows.map(packetRowToPacket));
+        }
+      } catch (err) {
+        if (!cancelled) setError(String(err));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+
+    void loadPreviousSession();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   return (
     <div className="h-full overflow-auto p-3">
+      <div className="glass-panel mb-3 flex items-center justify-between gap-3 p-3">
+        <div>
+          <p className="text-[10px] uppercase tracking-[0.18em] text-muted">Previous session diagnostics</p>
+          <h1 className="mt-1 text-sm font-semibold">
+            {session ? session.name ?? `Session #${session.id}` : "No saved session selected"}
+          </h1>
+          <p className="mt-1 text-xs text-secondary">
+            {session
+              ? `${session.total_packets.toLocaleString()} packets · ${formatSessionDate(session.started_at)}`
+              : "Stop a capture first to create a SQLite session."}
+          </p>
+        </div>
+        <div className="text-right text-xs text-secondary">
+          {loading && <span>Loading SQLite packets...</span>}
+          {error && <span className="text-red-200">{error}</span>}
+        </div>
+      </div>
       <DiagnosticsCards metrics={diagnostics.metrics} sparkline={diagnostics.timeline} />
       <div className="mt-3 grid grid-cols-[1.7fr_1fr] gap-3">
-        <Panel title="Traffic over the last 60 seconds">
+        <Panel title="Traffic across previous session">
           <ResponsiveContainer width="100%" height={230}>
             <LineChart data={diagnostics.timeline}>
               <CartesianGrid stroke="rgba(255,255,255,.06)" vertical={false} />
@@ -108,4 +190,43 @@ function Panel({ title, children }: { title: string; children: React.ReactNode }
 function GlassTooltip({ active, payload, label }: { active?: boolean; payload?: Array<{ name: string; value: number; color?: string }>; label?: string }) {
   if (!active || !payload?.length) return null;
   return <div className="glass-surface p-2 text-[11px] shadow-xl">{label && <p className="mb-1 text-muted">{label}</p>}{payload.map((item) => <p key={item.name} style={{ color: item.color }}>{item.name}: {item.value}</p>)}</div>;
+}
+
+function packetRowToPacket(row: PacketRow): Packet {
+  return {
+    id: row.id,
+    ts: row.ts,
+    src_ip: row.src_ip,
+    dst_ip: row.dst_ip,
+    src_port: row.src_port,
+    dst_port: row.dst_port,
+    protocol: toProtocol(row.protocol),
+    length: row.length ?? 0,
+    ttl: row.ttl,
+    flags: row.flags ?? "",
+    link_layer: row.link_layer,
+    src_mac: row.src_mac,
+    dst_mac: row.dst_mac,
+    src_vendor: row.src_vendor,
+    dst_vendor: row.dst_vendor,
+    payload_hex: row.payload_hex ?? "",
+    raw_ascii: row.raw_ascii ?? "",
+  };
+}
+
+function toProtocol(value: string | null): Protocol {
+  const protocols: Protocol[] = ["TCP", "UDP", "ICMP", "ARP", "DNS", "HTTP", "HTTPS", "OTHER"];
+  return protocols.includes(value as Protocol) ? (value as Protocol) : "OTHER";
+}
+
+function formatSessionDate(value: string | null) {
+  if (!value) return "No start date";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString([], {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }

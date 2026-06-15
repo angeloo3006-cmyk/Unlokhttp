@@ -26,6 +26,11 @@ export interface Packet {
   length:      number;
   ttl:         number | null;
   flags:       TcpFlags;
+  link_layer:  string | null;
+  src_mac:     string | null;
+  dst_mac:     string | null;
+  src_vendor:  string | null;
+  dst_vendor:  string | null;
   payload_hex: string;
   raw_ascii:   string;
 }
@@ -80,6 +85,11 @@ export interface PacketRow {
   length:      number | null;
   ttl:         number | null;
   flags:       string | null;
+  link_layer:  string | null;
+  src_mac:     string | null;
+  dst_mac:     string | null;
+  src_vendor:  string | null;
+  dst_vendor:  string | null;
   payload_hex: string | null;
   raw_ascii:   string | null;
 }

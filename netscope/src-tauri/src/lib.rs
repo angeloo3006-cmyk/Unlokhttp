@@ -60,6 +60,7 @@ pub fn run() {
             commands::get_diagnostics_data,
             commands::record_diagnostic,
             commands::export_packets_json,
+            commands::set_window_effect,
         ])
         .run(tauri::generate_context!())
         .expect("error while running netscope application");

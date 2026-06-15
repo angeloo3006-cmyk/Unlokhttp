@@ -61,9 +61,6 @@ export function FilterModal({ open, onOpenChange }: FilterModalProps) {
           <div className="mb-5 flex items-start justify-between">
             <div>
               <Dialog.Title className="text-base font-semibold text-primary">Advanced filters</Dialog.Title>
-              <Dialog.Description className="mt-1 text-xs text-secondary">
-                Combine filters with AND logic over the local packet buffer.
-              </Dialog.Description>
             </div>
             <Dialog.Close className="text-muted transition hover:text-white"><X size={16} /></Dialog.Close>
           </div>

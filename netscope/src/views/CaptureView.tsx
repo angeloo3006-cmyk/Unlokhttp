@@ -27,7 +27,7 @@ export function CaptureView() {
           </Panel>
           <ResizeHandle />
           <Panel defaultSize="25%" minSize="12%">
-            <PacketDetail selectedPacket={capture.selectedPacket} />
+            <PacketDetail selectedPacket={capture.selectedPacket} packets={capture.packets} />
           </Panel>
           <ResizeHandle />
           <Panel defaultSize="20%" minSize="10%">

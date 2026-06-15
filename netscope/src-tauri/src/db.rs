@@ -4,6 +4,8 @@ use std::sync::Mutex;
 use rusqlite::{params, Connection, Result as SqlResult, Row};
 use serde::{Deserialize, Serialize};
 
+const OUI_CSV: &str = include_str!("../data/oui.csv");
+
 // ES: Tipos serializables compartidos con Tauri. / EN: Serializable types shared with Tauri.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
@@ -18,6 +20,11 @@ pub struct Session {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PacketRow {
     pub id: i64,
+    pub link_layer: Option<String>,
+    pub src_mac: Option<String>,
+    pub dst_mac: Option<String>,
+    pub src_vendor: Option<String>,
+    pub dst_vendor: Option<String>,
     pub session_id: i64,
     pub ts: String,
     pub src_ip: Option<String>,
@@ -164,6 +171,11 @@ fn row_to_packet(row: &Row<'_>) -> SqlResult<PacketRow> {
         flags: row.get(10)?,
         payload_hex: row.get(11)?,
         raw_ascii: row.get(12)?,
+        link_layer: row.get(13)?,
+        src_mac: row.get(14)?,
+        dst_mac: row.get(15)?,
+        src_vendor: row.get(16)?,
+        dst_vendor: row.get(17)?,
     })
 }
 
@@ -186,6 +198,63 @@ fn row_to_diagnostic(row: &Row<'_>) -> SqlResult<DiagnosticRow> {
         metric: row.get(3)?,
         value: row.get(4)?,
     })
+}
+
+fn quote_identifier(identifier: &str) -> Result<String, String> {
+    let mut chars = identifier.chars();
+    let Some(first) = chars.next() else {
+        return Err("empty SQL identifier".to_string());
+    };
+
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        return Err(format!("invalid SQL identifier: {identifier}"));
+    }
+
+    if !chars.all(|c| c == '_' || c.is_ascii_alphanumeric()) {
+        return Err(format!("invalid SQL identifier: {identifier}"));
+    }
+
+    Ok(format!("\"{identifier}\""))
+}
+
+fn normalize_hex_prefix(value: &str) -> Option<String> {
+    let prefix: String = value
+        .chars()
+        .filter(|c| c.is_ascii_hexdigit())
+        .map(|c| c.to_ascii_uppercase())
+        .collect();
+
+    if prefix.len() >= 6 {
+        Some(prefix)
+    } else {
+        None
+    }
+}
+
+fn csv_record(line: &str) -> Vec<String> {
+    let mut fields = Vec::new();
+    let mut field = String::new();
+    let mut chars = line.chars().peekable();
+    let mut in_quotes = false;
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' if in_quotes && chars.peek() == Some(&'"') => {
+                field.push('"');
+                let _ = chars.next();
+            }
+            '"' => in_quotes = !in_quotes,
+            ',' if !in_quotes => {
+                fields.push(field.trim().to_string());
+                field.clear();
+            }
+            '\r' => {}
+            _ => field.push(ch),
+        }
+    }
+
+    fields.push(field.trim().to_string());
+    fields
 }
 
 // ES: Mantiene una unica conexion SQLite protegida por mutex. / EN: Holds one SQLite connection protected by a mutex.
@@ -250,6 +319,11 @@ impl DbManager {
                 flags       TEXT,
                 payload_hex TEXT,
                 raw_ascii   TEXT,
+                link_layer  TEXT,
+                src_mac     TEXT,
+                dst_mac     TEXT,
+                src_vendor  TEXT,
+                dst_vendor  TEXT,
                 PRIMARY KEY (session_id, id)
             );
 
@@ -260,6 +334,14 @@ impl DbManager {
                 ts         TEXT,
                 metric     TEXT,
                 value      REAL
+            );
+
+            -- ES/EN: Fabricantes OUI / OUI vendors
+            CREATE TABLE IF NOT EXISTS oui_vendors (
+                prefix   TEXT PRIMARY KEY,
+                vendor   TEXT NOT NULL,
+                registry TEXT,
+                address  TEXT
             );
 
             CREATE INDEX IF NOT EXISTS idx_diag_session
@@ -313,6 +395,13 @@ impl DbManager {
             .map_err(|e| format!("migrate packets primary key failed: {e}"))?;
         }
 
+        Self::add_column_if_missing(&conn, "packets", "link_layer", "TEXT")?;
+        Self::add_column_if_missing(&conn, "packets", "src_mac", "TEXT")?;
+        Self::add_column_if_missing(&conn, "packets", "dst_mac", "TEXT")?;
+        Self::add_column_if_missing(&conn, "packets", "src_vendor", "TEXT")?;
+        Self::add_column_if_missing(&conn, "packets", "dst_vendor", "TEXT")?;
+        Self::import_oui_csv_if_empty(&conn)?;
+
         conn.execute_batch(
             "
             CREATE INDEX IF NOT EXISTS idx_packets_session
@@ -325,9 +414,160 @@ impl DbManager {
                 ON packets(dst_ip);
             CREATE INDEX IF NOT EXISTS idx_packets_ts
                 ON packets(ts);
+            CREATE INDEX IF NOT EXISTS idx_packets_src_mac
+                ON packets(src_mac);
+            CREATE INDEX IF NOT EXISTS idx_packets_dst_mac
+                ON packets(dst_mac);
             ",
         )
         .map_err(|e| format!("create packet indexes failed: {e}"))
+    }
+
+    fn add_column_if_missing(
+        conn: &Connection,
+        table: &str,
+        column: &str,
+        definition: &str,
+    ) -> Result<(), String> {
+        if Self::column_exists(conn, table, column)? {
+            return Ok(());
+        }
+
+        let table_ident = quote_identifier(table)?;
+        let column_ident = quote_identifier(column)?;
+        let sql = format!("ALTER TABLE {table_ident} ADD COLUMN {column_ident} {definition}");
+        conn.execute(&sql, [])
+            .map_err(|e| format!("add missing column failed: {sql}: {e}"))?;
+        Ok(())
+    }
+
+    fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool, String> {
+        let table_ident = quote_identifier(table)?;
+        let sql = format!("PRAGMA table_info({table_ident})");
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| format!("inspect table columns failed: {sql}: {e}"))?;
+        let mut rows = stmt
+            .query([])
+            .map_err(|e| format!("read table columns failed: {sql}: {e}"))?;
+
+        while let Some(row) = rows
+            .next()
+            .map_err(|e| format!("iterate table columns failed: {sql}: {e}"))?
+        {
+            let name: String = row
+                .get(1)
+                .map_err(|e| format!("read column name failed: {sql}: {e}"))?;
+            if name.eq_ignore_ascii_case(column) {
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
+    }
+
+    fn import_oui_csv_if_empty(conn: &Connection) -> Result<(), String> {
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM oui_vendors", [], |row| row.get(0))
+            .map_err(|e| format!("count oui_vendors failed: {e}"))?;
+
+        if count > 0 {
+            return Ok(());
+        }
+
+        conn.execute_batch("BEGIN IMMEDIATE")
+            .map_err(|e| format!("begin OUI import failed: {e}"))?;
+
+        let import_result = (|| -> Result<usize, String> {
+            let mut inserted = 0usize;
+            let mut stmt = conn
+                .prepare_cached(
+                    "INSERT OR IGNORE INTO oui_vendors
+                     (prefix, vendor, registry, address)
+                     VALUES (?1, ?2, ?3, ?4)",
+                )
+                .map_err(|e| format!("prepare OUI import failed: {e}"))?;
+
+            for (line_no, line) in OUI_CSV.lines().enumerate() {
+                if line_no == 0 || line.trim().is_empty() {
+                    continue;
+                }
+
+                let fields = csv_record(line);
+                if fields.len() < 3 {
+                    continue;
+                }
+
+                let Some(prefix) = normalize_hex_prefix(&fields[1]) else {
+                    continue;
+                };
+
+                let registry = fields[0].trim();
+                let vendor = fields[2].trim();
+                if vendor.is_empty() {
+                    continue;
+                }
+
+                let address = fields
+                    .get(3)
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty());
+
+                inserted += stmt
+                    .execute(params![prefix, vendor, registry, address])
+                    .map_err(|e| format!("insert OUI row failed at CSV line {}: {e}", line_no + 1))?;
+            }
+
+            Ok(inserted)
+        })();
+
+        match import_result {
+            Ok(inserted) => {
+                conn.execute_batch("COMMIT")
+                    .map_err(|e| format!("commit OUI import failed: {e}"))?;
+                eprintln!("[db] imported {inserted} OUI vendor prefixes");
+                Ok(())
+            }
+            Err(err) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(err)
+            }
+        }
+    }
+
+    pub fn lookup_vendor_by_prefix(&self, prefix: &str) -> Result<Option<String>, String> {
+        let Some(prefix) = normalize_hex_prefix(prefix) else {
+            return Ok(None);
+        };
+
+        let conn = self.lock()?;
+        match conn.query_row(
+            "SELECT vendor FROM oui_vendors WHERE prefix = ?1",
+            params![prefix],
+            |row| row.get::<_, String>(0),
+        ) {
+            Ok(vendor) => Ok(Some(vendor)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(format!("lookup OUI vendor failed: {e}")),
+        }
+    }
+
+    pub fn lookup_vendor_for_mac(&self, mac: &str) -> Result<Option<String>, String> {
+        let Some(normalized) = normalize_hex_prefix(mac) else {
+            return Ok(None);
+        };
+
+        for len in [9usize, 7, 6] {
+            if normalized.len() < len {
+                continue;
+            }
+
+            if let Some(vendor) = self.lookup_vendor_by_prefix(&normalized[..len])? {
+                return Ok(Some(vendor));
+            }
+        }
+
+        Ok(None)
     }
 
     pub fn create_session(
@@ -392,8 +632,9 @@ impl DbManager {
         conn.execute(
             "INSERT OR REPLACE INTO packets
              (id, session_id, ts, src_ip, dst_ip, src_port, dst_port,
-              protocol, length, ttl, flags, payload_hex, raw_ascii)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+              protocol, length, ttl, flags, payload_hex, raw_ascii,
+              link_layer, src_mac, dst_mac, src_vendor, dst_vendor)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
             params![
                 pkt.id,
                 session_id,
@@ -408,6 +649,11 @@ impl DbManager {
                 pkt.flags,
                 pkt.payload_hex,
                 pkt.raw_ascii,
+                pkt.link_layer,
+                pkt.src_mac,
+                pkt.dst_mac,
+                pkt.src_vendor,
+                pkt.dst_vendor,
             ],
         )
         .map_err(|e| format!("insert_packet failed: {e}"))?;
@@ -430,8 +676,9 @@ impl DbManager {
                 .prepare_cached(
                     "INSERT OR REPLACE INTO packets
                      (id, session_id, ts, src_ip, dst_ip, src_port, dst_port,
-                      protocol, length, ttl, flags, payload_hex, raw_ascii)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+                       protocol, length, ttl, flags, payload_hex, raw_ascii,
+                       link_layer, src_mac, dst_mac, src_vendor, dst_vendor)
+                      VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
                 )
                 .map_err(|e| format!("bulk stmt prepare: {e}"))?;
 
@@ -450,6 +697,11 @@ impl DbManager {
                     pkt.flags,
                     pkt.payload_hex,
                     pkt.raw_ascii,
+                    pkt.link_layer,
+                    pkt.src_mac,
+                    pkt.dst_mac,
+                    pkt.src_vendor,
+                    pkt.dst_vendor,
                 ])
                 .map_err(|e| format!("bulk insert row: {e}"))?;
             }
@@ -471,7 +723,8 @@ impl DbManager {
 
         let sql = format!(
             "SELECT id, session_id, ts, src_ip, dst_ip, src_port, dst_port,
-                    protocol, length, ttl, flags, payload_hex, raw_ascii
+                    protocol, length, ttl, flags, payload_hex, raw_ascii,
+                    link_layer, src_mac, dst_mac, src_vendor, dst_vendor
              FROM packets{}
              ORDER BY id ASC",
             qb.where_clause()
@@ -523,7 +776,8 @@ impl DbManager {
 
         let data_sql = format!(
             "SELECT id, session_id, ts, src_ip, dst_ip, src_port, dst_port,
-                    protocol, length, ttl, flags, payload_hex, raw_ascii
+                    protocol, length, ttl, flags, payload_hex, raw_ascii,
+                    link_layer, src_mac, dst_mac, src_vendor, dst_vendor
              FROM packets{where_sql2}
              ORDER BY id DESC
              LIMIT ?{} OFFSET ?{}",

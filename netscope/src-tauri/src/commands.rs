@@ -1,7 +1,13 @@
 use std::sync::{Arc, Mutex};
+#[cfg(target_os = "windows")]
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, State, WebviewWindow};
+#[cfg(target_os = "windows")]
+use window_vibrancy::{apply_acrylic, clear_acrylic};
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
 
 use crate::db::{DbManager, DiagnosticsData, PacketFilters, PacketRow, PaginatedResult, Session};
 use crate::sniffer::{Interface, SidecarManager, Stats};
@@ -27,6 +33,57 @@ macro_rules! lock {
     ($mutex:expr) => {
         $mutex.lock().map_err(|e| format!("mutex poisoned: {e}"))
     };
+}
+
+#[tauri::command]
+pub fn set_window_effect(window: WebviewWindow, enabled: bool) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        if enabled {
+            apply_acrylic(&window, Some((18, 18, 18, 125))).map_err(|e| e.to_string())?;
+        } else {
+            clear_acrylic(&window).map_err(|e| e.to_string())?;
+            let restore_window = window.clone();
+            std::thread::spawn(move || {
+                let started_at = Instant::now();
+                let min_hold_until = started_at + Duration::from_millis(450);
+                let deadline = started_at + Duration::from_secs(15);
+                let mut saw_left_button_down = false;
+
+                while Instant::now() < deadline {
+                    let pressed =
+                        unsafe { (GetAsyncKeyState(VK_LBUTTON as i32) as u16 & 0x8000) != 0 };
+
+                    if pressed {
+                        saw_left_button_down = true;
+                    }
+
+                    let min_hold_elapsed = Instant::now() >= min_hold_until;
+                    let no_press_detected_timeout =
+                        !saw_left_button_down && started_at.elapsed() >= Duration::from_millis(900);
+
+                    if min_hold_elapsed
+                        && ((!pressed && saw_left_button_down) || no_press_detected_timeout)
+                    {
+                        std::thread::sleep(Duration::from_millis(140));
+                        break;
+                    }
+
+                    std::thread::sleep(Duration::from_millis(24));
+                }
+
+                let _ = apply_acrylic(&restore_window, Some((18, 18, 18, 125)));
+                let _ = restore_window.emit("window_effect_restored", ());
+            });
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (window, enabled);
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]

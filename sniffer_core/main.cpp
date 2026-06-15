@@ -35,6 +35,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <cstdint>
 #include <cstring>
 #include <iomanip>
@@ -124,6 +125,7 @@ namespace g {
     std::atomic<uint64_t> dropped  { 0 };
     std::string         current_filter;
     int                 current_iface = -1;
+    int                 link_type = DLT_EN10MB;
     std::thread         capture_thread;
     std::thread         stats_thread;
     std::thread         stdin_thread;
@@ -159,6 +161,130 @@ static std::string iso8601_now() {
     oss << std::put_time(&tm_buf, "%Y-%m-%dT%H:%M:%S")
         << '.' << std::setfill('0') << std::setw(3) << ms.count() << 'Z';
     return oss.str();
+}
+
+// ES: Convierte una MAC binaria de 6 bytes a texto legible. / EN: Converts a 6-byte binary MAC address into readable text.
+static std::string mac_to_str(const uint8_t* mac) {
+    char buf[18];
+    std::snprintf(buf, sizeof(buf), "%02x:%02x:%02x:%02x:%02x:%02x",
+                  mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    return std::string(buf);
+}
+
+struct LinkLayerInfo {
+    const uint8_t* network_data = nullptr;
+    uint32_t network_len = 0;
+    uint16_t network_type = 0;
+    bool has_network_payload = false;
+};
+
+static uint16_t read_be16(const uint8_t* data) {
+    return static_cast<uint16_t>((static_cast<uint16_t>(data[0]) << 8) | data[1]);
+}
+
+static const char* link_type_name(int link_type) {
+    switch (link_type) {
+        case DLT_EN10MB:
+            return "Ethernet";
+#ifdef DLT_RAW
+        case DLT_RAW:
+            return "Raw IP";
+#endif
+#ifdef DLT_NULL
+        case DLT_NULL:
+            return "Loopback";
+#endif
+#ifdef DLT_LINUX_SLL
+        case DLT_LINUX_SLL:
+            return "Linux cooked";
+#endif
+        default:
+            return "Unsupported";
+    }
+}
+
+// ES: Separa la capa de enlace de la capa de red antes de parsear IP.
+// EN: Separates the link layer from the network layer before parsing IP.
+static LinkLayerInfo parse_link_layer(json& out, const uint8_t* data, uint32_t cap_len) {
+    LinkLayerInfo link{};
+    link.network_data = data;
+    link.network_len = cap_len;
+
+    out["link_layer"] = link_type_name(g::link_type);
+    out["src_mac"] = nullptr;
+    out["dst_mac"] = nullptr;
+    out["src_vendor"] = nullptr;
+    out["dst_vendor"] = nullptr;
+
+    switch (g::link_type) {
+        case DLT_EN10MB: {
+            if (cap_len < sizeof(EtherHeader)) {
+                return link;
+            }
+
+            const auto* eth = reinterpret_cast<const EtherHeader*>(data);
+            out["src_mac"] = mac_to_str(eth->src);
+            out["dst_mac"] = mac_to_str(eth->dst);
+
+            link.network_data = data + sizeof(EtherHeader);
+            link.network_len = cap_len - static_cast<uint32_t>(sizeof(EtherHeader));
+            link.network_type = ntohs(eth->type);
+            link.has_network_payload = true;
+            return link;
+        }
+#ifdef DLT_RAW
+        case DLT_RAW: {
+            if (cap_len == 0) {
+                return link;
+            }
+
+            const uint8_t ip_version = (data[0] >> 4) & 0x0F;
+            if (ip_version == 4) {
+                link.network_type = 0x0800;
+                link.has_network_payload = true;
+            } else if (ip_version == 6) {
+                link.network_type = 0x86DD;
+                link.has_network_payload = true;
+            }
+            return link;
+        }
+#endif
+#ifdef DLT_NULL
+        case DLT_NULL: {
+            if (cap_len <= 4) {
+                return link;
+            }
+
+            link.network_data = data + 4;
+            link.network_len = cap_len - 4;
+            const uint8_t ip_version = (link.network_data[0] >> 4) & 0x0F;
+            if (ip_version == 4) {
+                link.network_type = 0x0800;
+                link.has_network_payload = true;
+            } else if (ip_version == 6) {
+                link.network_type = 0x86DD;
+                link.has_network_payload = true;
+            }
+            return link;
+        }
+#endif
+#ifdef DLT_LINUX_SLL
+        case DLT_LINUX_SLL: {
+            constexpr uint32_t linux_sll_header_len = 16;
+            if (cap_len < linux_sll_header_len) {
+                return link;
+            }
+
+            link.network_data = data + linux_sll_header_len;
+            link.network_len = cap_len - linux_sll_header_len;
+            link.network_type = read_be16(data + 14);
+            link.has_network_payload = true;
+            return link;
+        }
+#endif
+        default:
+            return link;
+    }
 }
 
 static std::string ip4_to_str(uint32_t addr_be) {
@@ -275,22 +401,20 @@ static void packet_handler(u_char* /* ES/EN: user data. */,
     const uint8_t* data = reinterpret_cast<const uint8_t*>(pkt);
     uint32_t cap_len    = hdr->caplen;
 
-    // ES/EN: Ethernet.
-    if (cap_len < sizeof(EtherHeader)) {
+    LinkLayerInfo link = parse_link_layer(out, data, cap_len);
+    if (!link.has_network_payload) {
         out["payload_hex"] = bytes_to_hex(data, cap_len);
         out["raw_ascii"]   = bytes_to_ascii(data, cap_len);
         emit(out);
         ++g::captured;
         return;
     }
-    const auto* eth = reinterpret_cast<const EtherHeader*>(data);
-    uint16_t eth_type = ntohs(eth->type);
 
-    const uint8_t* l3   = data + sizeof(EtherHeader);
-    uint32_t l3_len = cap_len - sizeof(EtherHeader);
+    const uint8_t* l3 = link.network_data;
+    uint32_t l3_len = link.network_len;
 
     // ES/EN: ARP.
-    if (eth_type == 0x0806) {
+    if (link.network_type == 0x0806) {
         out["protocol"] = "ARP";
         if (l3_len >= sizeof(ArpHeader)) {
             const auto* arp = reinterpret_cast<const ArpHeader*>(l3);
@@ -305,7 +429,7 @@ static void packet_handler(u_char* /* ES/EN: user data. */,
     }
 
     // ES/EN: IPv4.
-    if (eth_type != 0x0800) {
+    if (link.network_type != 0x0800) {
         // ES: Para protocolos distintos de IP y ARP emite informacion minima. / EN: Emit minimal information for non-IP, non-ARP protocols.
         out["payload_hex"] = bytes_to_hex(l3, l3_len);
         out["raw_ascii"]   = bytes_to_ascii(l3, l3_len);
@@ -500,6 +624,7 @@ static bool do_start(int iface_id) {
         emit_error(std::string("pcap_open_live: ") + errbuf);
         return false;
     }
+    g::link_type = pcap_datalink(h);
 
     // ES: Aplica el filtro actual si existe. / EN: Apply the current filter if present.
     if (!g::current_filter.empty()) {

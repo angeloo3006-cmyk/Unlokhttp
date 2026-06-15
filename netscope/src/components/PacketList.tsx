@@ -14,6 +14,17 @@ import type { FilterState } from "@/store/filters";
 
 const columnHelper = createColumnHelper<Packet>();
 
+function formatLocalTime(ts: string) {
+  const date = new Date(ts);
+  if (Number.isNaN(date.getTime())) return "-";
+  return date.toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }) + `.${String(date.getMilliseconds()).padStart(3, "0")}`;
+}
+
 const protocolClasses: Record<Packet["protocol"], string> = {
   TCP: "proto-blue",
   UDP: "proto-cyan",
@@ -53,7 +64,7 @@ export function PacketList({ packets, filters, selectedPacket, onSelectPacket }:
       columnHelper.accessor("ts", {
         header: "Time",
         size: 112,
-        cell: ({ getValue }) => getValue().slice(11, 23),
+        cell: ({ getValue }) => formatLocalTime(getValue()),
       }),
       columnHelper.accessor("src_ip", {
         header: "Source",

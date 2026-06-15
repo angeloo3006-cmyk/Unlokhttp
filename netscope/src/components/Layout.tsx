@@ -11,7 +11,7 @@ export function Layout() {
   const capture = usePacketCapture();
 
   return (
-    <div className="flex h-screen flex-col overflow-hidden bg-transparent text-primary">
+    <div className="app-glass-shell flex h-screen flex-col overflow-hidden bg-transparent text-primary">
       <TitleBar />
       {capture.error && (
         <button className="border-b border-red-300/15 bg-red-500/15 px-3 py-1 text-left text-xs text-red-100" onClick={() => capture.setError(null)}>
