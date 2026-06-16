@@ -1,4 +1,3 @@
-import { AlertCircle, CheckCircle2, Info } from "lucide-react";
 import { useEffect, useState } from "react";
 import {
   CartesianGrid,
@@ -14,6 +13,7 @@ import {
 } from "recharts";
 import { useDiagnostics } from "@/hooks/useDiagnostics";
 import { DiagnosticsCards } from "@/components/DiagnosticsCards";
+import { DiagnosticAlertCard } from "@/components/diagnostics/DiagnosticAlertCard";
 import { listSessions, queryPackets, type Session } from "@/lib/tauri";
 import { packetRowToPacket } from "@/lib/packetRows";
 import type { Packet } from "@/types/packet";
@@ -173,43 +173,7 @@ export function DiagnosticsView() {
         </Panel>
         <Panel title="Automatic diagnostic">
           <div className="space-y-2">
-            {diagnostics.alerts.map((alert) => {
-              const Icon = alert.level === "success" ? CheckCircle2 : alert.level === "warning" ? AlertCircle : Info;
-              const icon = alert.level === "critical" ? AlertCircle : Icon;
-              const DiagnosticIcon = icon;
-              return (
-                <div className={`alert-${alert.level} rounded-lg border p-2 text-xs`} key={alert.id}>
-                  <div className="flex gap-2">
-                    <DiagnosticIcon className="mt-0.5 shrink-0" size={14} />
-                    <div className="min-w-0">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="font-semibold text-primary">{alert.title}</span>
-                        <span className="rounded-full border border-white/10 px-1.5 py-0.5 text-[10px] text-secondary">
-                          {signalLabel(alert.confidence)}
-                        </span>
-                        {typeof alert.metrics.impact_score === "number" && (
-                          <span className="rounded-full border border-white/10 px-1.5 py-0.5 text-[10px] text-muted">
-                            Impact {(alert.metrics.impact_score * 100).toFixed(0)}%
-                          </span>
-                        )}
-                      </div>
-                      <p className="mt-1 text-secondary">{alert.message}</p>
-                      {alert.evidence.length > 0 && (
-                        <ul className="mt-2 space-y-1 text-[11px] text-secondary">
-                          {alert.evidence.slice(0, 4).map((item) => (
-                            <li className="flex gap-1.5" key={item}>
-                              <span className="mt-1 h-1 w-1 shrink-0 rounded-full bg-current opacity-60" />
-                              <span>{item}</span>
-                            </li>
-                          ))}
-                        </ul>
-                      )}
-                      <p className="mt-2 text-[11px] text-muted">{alert.recommendation}</p>
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
+            {diagnostics.alerts.map((alert) => <DiagnosticAlertCard alert={alert} key={alert.id} />)}
           </div>
         </Panel>
       </div>
@@ -236,11 +200,4 @@ function formatSessionDate(value: string | null) {
     hour: "2-digit",
     minute: "2-digit",
   });
-}
-
-function signalLabel(value: number) {
-  if (value >= 0.78) return "Very strong signal";
-  if (value >= 0.58) return "Strong signal";
-  if (value >= 0.38) return "Moderate signal";
-  return "Low signal";
 }
