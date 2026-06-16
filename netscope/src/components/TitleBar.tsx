@@ -1,17 +1,17 @@
 import { Minus, Square, X } from "lucide-react";
-import { useEffect, useRef, type PointerEvent } from "react";
+import { useEffect, useMemo, useRef, type PointerEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { usePacketCapture } from "@/hooks/usePacketCapture";
 
-const appWindow = getCurrentWindow();
-
 export function TitleBar() {
   const { isCapturing, stats } = usePacketCapture();
+  const appWindow = useMemo(() => (isTauriRuntime() ? getCurrentWindow() : null), []);
   const restoreTimer = useRef<number | null>(null);
   const effectPaused = useRef(false);
   const disablingEffect = useRef(false);
+  const suppressResizePauseUntil = useRef(0);
 
   const restoreWindowEffect = () => {
     if (restoreTimer.current !== null) {
@@ -40,7 +40,7 @@ export function TitleBar() {
     document.documentElement.classList.add("window-effect-paused");
 
     try {
-      await invoke("set_window_effect", { enabled: false });
+      if (appWindow) await invoke("set_window_effect", { enabled: false });
     } catch (error) {
       console.warn("disable window effect failed", error);
     } finally {
@@ -49,6 +49,8 @@ export function TitleBar() {
   };
 
   useEffect(() => {
+    if (!appWindow) return undefined;
+
     let unlistenRestored: (() => void) | undefined;
     let unlistenResized: (() => void) | undefined;
     let unlistenMoved: (() => void) | undefined;
@@ -65,6 +67,7 @@ export function TitleBar() {
     };
 
     void appWindow.onResized(() => {
+      if (Date.now() < suppressResizePauseUntil.current) return;
       pauseEffectDuringWindowChange();
     }).then((listener) => {
       unlistenResized = listener;
@@ -87,15 +90,24 @@ export function TitleBar() {
 
   const startTitleDrag = async (event: PointerEvent<HTMLDivElement>) => {
     if (event.button !== 0) return;
+    if (!appWindow) return;
 
     if (event.detail >= 2) {
-      await appWindow.toggleMaximize();
+      await toggleMaximizeWithoutPausingEffect();
       return;
     }
 
     await disableWindowEffect();
     scheduleVisualFallbackRestore();
     await appWindow.startDragging();
+  };
+
+  const toggleMaximizeWithoutPausingEffect = async () => {
+    suppressResizePauseUntil.current = Date.now() + 1_200;
+    await appWindow?.toggleMaximize();
+    window.setTimeout(() => {
+      if (Date.now() >= suppressResizePauseUntil.current) suppressResizePauseUntil.current = 0;
+    }, 1_300);
   };
 
   return (
@@ -109,16 +121,20 @@ export function TitleBar() {
       </div>
       <div className="h-full flex-1" onPointerDown={startTitleDrag} />
       <div className="flex h-full">
-        <button className="title-button" onClick={() => appWindow.minimize()} aria-label="Minimize">
+        <button className="title-button" onClick={() => appWindow?.minimize()} aria-label="Minimize">
           <Minus size={14} />
         </button>
-        <button className="title-button" onClick={() => appWindow.toggleMaximize()} aria-label="Maximize">
+        <button className="title-button" onClick={() => void toggleMaximizeWithoutPausingEffect()} aria-label="Maximize">
           <Square size={12} />
         </button>
-        <button className="title-button hover:bg-red-500/80" onClick={() => appWindow.close()} aria-label="Close">
+        <button className="title-button hover:bg-red-500/80" onClick={() => appWindow?.close()} aria-label="Close">
           <X size={14} />
         </button>
       </div>
     </header>
   );
+}
+
+function isTauriRuntime() {
+  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }

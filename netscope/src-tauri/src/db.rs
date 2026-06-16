@@ -1075,11 +1075,29 @@ impl DbManager {
             let pattern = format!("%{s}%");
             let idx = qb.values.len();
             qb.clauses.push(format!(
-                "(src_ip LIKE ?{} OR dst_ip LIKE ?{} OR protocol LIKE ?{})",
+                "(src_ip LIKE ?{} OR dst_ip LIKE ?{} OR protocol LIKE ?{} OR
+                  src_mac LIKE ?{} OR dst_mac LIKE ?{} OR
+                  src_vendor LIKE ?{} OR dst_vendor LIKE ?{} OR
+                  CAST(src_port AS TEXT) LIKE ?{} OR CAST(dst_port AS TEXT) LIKE ?{} OR
+                  flags LIKE ?{})",
                 idx + 1,
                 idx + 2,
-                idx + 3
+                idx + 3,
+                idx + 4,
+                idx + 5,
+                idx + 6,
+                idx + 7,
+                idx + 8,
+                idx + 9,
+                idx + 10,
             ));
+            qb.values.push(Box::new(pattern.clone()));
+            qb.values.push(Box::new(pattern.clone()));
+            qb.values.push(Box::new(pattern.clone()));
+            qb.values.push(Box::new(pattern.clone()));
+            qb.values.push(Box::new(pattern.clone()));
+            qb.values.push(Box::new(pattern.clone()));
+            qb.values.push(Box::new(pattern.clone()));
             qb.values.push(Box::new(pattern.clone()));
             qb.values.push(Box::new(pattern.clone()));
             qb.values.push(Box::new(pattern));

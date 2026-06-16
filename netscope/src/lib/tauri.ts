@@ -5,8 +5,8 @@
  * EN: Typed wrappers for commands and events exposed by Rust.
  */
 
-import { invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+import { listen as tauriListen, type UnlistenFn } from "@tauri-apps/api/event";
 
 export type Protocol =
   | "TCP" | "UDP" | "ICMP" | "ARP"
@@ -157,6 +157,25 @@ export interface StartCaptureArgs {
   interfaceName?: string;
 }
 
+function isTauriRuntime() {
+  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
+
+function invoke<T>(cmd: string, args?: Record<string, unknown>, browserFallback?: T): Promise<T> {
+  if (!isTauriRuntime()) {
+    void cmd;
+    void args;
+    return Promise.resolve(browserFallback as T);
+  }
+
+  return tauriInvoke<T>(cmd, args);
+}
+
+function listen<T>(event: string, cb: (event: { payload: T }) => void): Promise<UnlistenFn> {
+  if (!isTauriRuntime()) return Promise.resolve(() => {});
+  return tauriListen<T>(event, cb);
+}
+
 /**
  * ES: Inicia captura y devuelve el id de la nueva sesion DB.
  * EN: Starts capture and returns the new DB session id.
@@ -168,52 +187,52 @@ export async function startCapture(args: StartCaptureArgs): Promise<number> {
       session_name:   args.sessionName   ?? null,
       interface_name: args.interfaceName ?? null,
     },
-  });
+  }, 0);
 }
 
 /** ES: Detiene la captura activa; es idempotente. / EN: Stops active capture; idempotent. */
 export async function stopCapture(): Promise<void> {
-  return invoke("stop_capture");
+  return invoke("stop_capture", undefined, undefined);
 }
 
 /** ES: Cambia de interfaz sin crear sesion. / EN: Changes interface without creating a session. */
 export async function setInterface(interfaceId: number): Promise<void> {
-  return invoke("set_interface", { interfaceId });
+  return invoke("set_interface", { interfaceId }, undefined);
 }
 
 /** ES: Aplica un filtro BPF. / EN: Applies a BPF filter. */
 export async function setBpfFilter(filter: string): Promise<void> {
-  return invoke("set_bpf_filter", { filter });
+  return invoke("set_bpf_filter", { filter }, undefined);
 }
 
 /** ES: Devuelve interfaces disponibles. / EN: Returns available interfaces. */
 export async function listInterfaces(): Promise<ListInterfacesResponse> {
-  return invoke("list_interfaces");
+  return invoke("list_interfaces", undefined, { interfaces: mockInterfaces(), refreshed: false });
 }
 
 /** ES: Obtiene un snapshot de estadisticas. / EN: Retrieves a stats snapshot. */
 export async function getStats(): Promise<Stats> {
-  return invoke("get_stats");
+  return invoke("get_stats", undefined, { captured: 0, dropped: 0, rate_pps: 0 });
 }
 
 /** ES: Comprueba si el sidecar captura. / EN: Checks whether the sidecar is capturing. */
 export async function captureStatus(): Promise<CaptureStatusResponse> {
-  return invoke("capture_status");
+  return invoke("capture_status", undefined, { running: false, session_id: null });
 }
 
 /** ES: Lista sesiones recientes primero. / EN: Lists sessions newest first. */
 export async function listSessions(): Promise<Session[]> {
-  return invoke("list_sessions");
+  return invoke("list_sessions", undefined, mockSessions());
 }
 
 /** ES: Elimina sesion y paquetes asociados. / EN: Deletes a session and its packets. */
 export async function deleteSession(sessionId: number): Promise<void> {
-  return invoke("delete_session", { sessionId });
+  return invoke("delete_session", { sessionId }, undefined);
 }
 
 /** ES: Guarda un paquete en la sesion actual. / EN: Persists a packet in the current session. */
 export async function persistPacket(packet: PacketRow): Promise<void> {
-  return invoke("persist_packet", { packet });
+  return invoke("persist_packet", { packet }, undefined);
 }
 
 export interface QueryPacketsArgs {
@@ -237,6 +256,7 @@ export interface QueryPacketsArgs {
 export async function queryPackets(
   args: QueryPacketsArgs,
 ): Promise<PaginatedResult<PacketRow>> {
+  const mockPacketPage = mockPacketsPage(args);
   return invoke("query_packets", {
     args: {
       session_id: args.sessionId,
@@ -244,6 +264,12 @@ export async function queryPackets(
       page:       args.page,
       page_size:  args.pageSize,
     },
+  }, mockPacketPage ?? {
+    items: [],
+    total: 0,
+    page: args.page,
+    page_size: args.pageSize,
+    total_pages: 1,
   });
 }
 
@@ -258,7 +284,7 @@ export async function exportPacketsJson(
   return invoke("export_packets_json", {
     sessionId,
     filters: filters ?? null,
-  });
+  }, "[]");
 }
 
 /**
@@ -268,7 +294,17 @@ export async function exportPacketsJson(
 export async function getDiagnosticsData(
   sessionId: number,
 ): Promise<DiagnosticsData> {
-  return invoke("get_diagnostics_data", { sessionId });
+  return invoke("get_diagnostics_data", { sessionId }, mockDiagnostics(sessionId) ?? {
+    session_id: sessionId,
+    protocol_stats: [],
+    traffic_timeline: [],
+    top_src_ips: [],
+    top_dst_ips: [],
+    total_packets: 0,
+    total_bytes: 0,
+    avg_packet_size: 0,
+    recent_errors: [],
+  });
 }
 
 /** ES: Guarda una metrica en diagnosticos. / EN: Stores a diagnostics metric. */
@@ -277,7 +313,7 @@ export async function recordDiagnostic(
   metric:    string,
   value:     number,
 ): Promise<void> {
-  return invoke("record_diagnostic", { sessionId, metric, value });
+  return invoke("record_diagnostic", { sessionId, metric, value }, undefined);
 }
 
 /** ES: Se ejecuta por paquete; limitar frecuencia si hace falta. / EN: Runs per packet; throttle if needed. */
@@ -307,4 +343,115 @@ export function onSnifferError(
   cb: (err: SnifferError) => void,
 ): Promise<UnlistenFn> {
   return listen<SnifferError>("sniffer_error", (e) => cb(e.payload));
+}
+
+/** ES: Recibe cambios de estado de captura. / EN: Receives capture state changes. */
+export function onCaptureState(
+  cb: (state: { running: boolean }) => void,
+): Promise<UnlistenFn> {
+  return listen<{ running: boolean }>("capture_state", (e) => cb(e.payload));
+}
+
+function browserMockEnabled() {
+  return !isTauriRuntime()
+    && typeof window !== "undefined"
+    && window.location.search.includes("mockSessions=1");
+}
+
+function mockSessions(): Session[] {
+  if (!browserMockEnabled()) return [];
+  return [{
+    id: 1,
+    name: "Capture 14/6/2026, 10:26:47 p.m.",
+    interface: "\\Device\\NPF_{8DB606F1-8752-4C7F-9C6A-18E4969CF24E}",
+    started_at: "2026-06-15T04:26:47.744Z",
+    ended_at: "2026-06-15T04:26:51.657Z",
+    total_packets: 41,
+  }];
+}
+
+function mockInterfaces(): Interface[] {
+  if (!browserMockEnabled()) return [];
+  return [{
+    id: 0,
+    name: "\\Device\\NPF_{8DB606F1-8752-4C7F-9C6A-18E4969CF24E}",
+    desc: "Wi-Fi",
+    loopback: false,
+    up: true,
+  }];
+}
+
+function mockPacketRows(): PacketRow[] {
+  if (!browserMockEnabled()) return [];
+
+  return Array.from({ length: 41 }, (_, index) => {
+    const protocol = index % 8 === 0 ? "UDP" : "OTHER";
+    const length = protocol === "UDP" ? 77 : 158;
+    return {
+      id: index,
+      session_id: 1,
+      ts: index < 2 ? "2026-06-15T04:26:47.744Z" : "2026-06-15T04:26:51.657Z",
+      src_ip: protocol === "UDP" ? "192.168.1.84" : null,
+      dst_ip: protocol === "UDP" ? "192.168.1.255" : null,
+      src_port: protocol === "UDP" ? 56517 : null,
+      dst_port: protocol === "UDP" ? 15600 : null,
+      protocol,
+      length,
+      ttl: protocol === "UDP" ? 128 : null,
+      flags: "",
+      link_layer: "Ethernet",
+      src_mac: protocol === "UDP" ? "00:11:22:33:44:55" : null,
+      dst_mac: protocol === "UDP" ? "ff:ff:ff:ff:ff:ff" : null,
+      src_vendor: protocol === "UDP" ? "Mock Vendor" : null,
+      dst_vendor: protocol === "UDP" ? "Broadcast" : null,
+      payload_hex: "60053f2c001406402806103e00027d65".repeat(2),
+      raw_ascii: "`?.-,....@(...>}e",
+    };
+  });
+}
+
+function mockPacketsPage(args: QueryPacketsArgs): PaginatedResult<PacketRow> | null {
+  const rows = mockPacketRows();
+  if (!rows.length) return null;
+
+  const search = args.filters.search?.trim().toLowerCase();
+  const filtered = search
+    ? rows.filter((row) => JSON.stringify(row).toLowerCase().includes(search))
+    : rows;
+  const pageSize = Math.max(1, args.pageSize);
+  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+  const page = Math.min(Math.max(1, args.page), totalPages);
+  const offset = (page - 1) * pageSize;
+
+  return {
+    items: filtered.slice(offset, offset + pageSize),
+    total: filtered.length,
+    page,
+    page_size: pageSize,
+    total_pages: totalPages,
+  };
+}
+
+function mockDiagnostics(sessionId: number): DiagnosticsData | null {
+  const rows = mockPacketRows();
+  if (!rows.length) return null;
+
+  const totalBytes = rows.reduce((sum, row) => sum + (row.length ?? 0), 0);
+  const protocolCounts = rows.reduce<Record<string, number>>((counts, row) => {
+    const protocol = row.protocol ?? "OTHER";
+    counts[protocol] = (counts[protocol] ?? 0) + 1;
+    return counts;
+  }, {});
+
+  return {
+    session_id: sessionId,
+    protocol_stats: Object.entries(protocolCounts).map(([protocol, count]) => ({ protocol, count })),
+    traffic_timeline: [{ bucket: "2026-06-15T04:26:47.744Z", packets: rows.length, bytes: totalBytes }],
+    top_src_ips: [{ ip: "192.168.1.84", count: 5 }],
+    top_dst_ips: [{ ip: "192.168.1.255", count: 5 }],
+    total_packets: rows.length,
+    total_bytes: totalBytes,
+    avg_packet_size: totalBytes / rows.length,
+    recent_errors: [],
+  };
 }

@@ -10,7 +10,7 @@ import {
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { ArrowDownToLine } from "lucide-react";
 import type { Packet } from "@/types/packet";
-import type { FilterState } from "@/store/filters";
+import { EMPTY_FILTERS, type FilterState } from "@/store/filters";
 
 const columnHelper = createColumnHelper<Packet>();
 
@@ -38,25 +38,42 @@ const protocolClasses: Record<Packet["protocol"], string> = {
 
 interface PacketListProps {
   packets: Packet[];
-  filters: FilterState;
+  filters?: FilterState;
   selectedPacket: Packet | null;
   onSelectPacket: (packet: Packet) => void;
+  title?: string;
+  showFollow?: boolean;
+  trafficSummary?: {
+    totalPackets: number;
+    totalBytes: number;
+    protocolCounts: Map<Packet["protocol"], number>;
+  };
 }
 
-export function PacketList({ packets, filters, selectedPacket, onSelectPacket }: PacketListProps) {
+export function PacketList({
+  packets,
+  filters = EMPTY_FILTERS,
+  selectedPacket,
+  onSelectPacket,
+  title = "Packet list",
+  showFollow = true,
+  trafficSummary,
+}: PacketListProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [sorting, setSorting] = useState<SortingState>([]);
   const [follow, setFollow] = useState(true);
 
   const traffic = useMemo(() => {
+    if (trafficSummary) return trafficSummary;
+
     const protocolCounts = new Map<Packet["protocol"], number>();
     const totalBytes = packets.reduce((sum, packet) => {
       protocolCounts.set(packet.protocol, (protocolCounts.get(packet.protocol) ?? 0) + 1);
       return sum + packet.length;
     }, 0);
 
-    return { protocolCounts, totalBytes };
-  }, [packets]);
+    return { protocolCounts, totalBytes, totalPackets: packets.length };
+  }, [packets, trafficSummary]);
 
   const columns = useMemo(
     () => [
@@ -88,7 +105,7 @@ export function PacketList({ packets, filters, selectedPacket, onSelectPacket }:
         header: "Weight",
         size: 72,
         cell: ({ row }) =>
-          `${(((traffic.protocolCounts.get(row.original.protocol) ?? 0) / Math.max(1, packets.length)) * 100).toFixed(1)}%`,
+          `${(((traffic.protocolCounts.get(row.original.protocol) ?? 0) / Math.max(1, traffic.totalPackets)) * 100).toFixed(1)}%`,
       }),
       columnHelper.accessor("length", { header: "Length", size: 68 }),
       columnHelper.display({
@@ -107,7 +124,7 @@ export function PacketList({ packets, filters, selectedPacket, onSelectPacket }:
       columnHelper.accessor("flags", { header: "Flags", size: 74, cell: ({ getValue }) => getValue() || "-" }),
       columnHelper.display({ id: "info", header: "Info", size: 300, cell: ({ row }) => packetInfo(row.original) }),
     ],
-    [packets.length, traffic.protocolCounts, traffic.totalBytes],
+    [traffic.protocolCounts, traffic.totalBytes, traffic.totalPackets],
   );
 
   const table = useReactTable({
@@ -133,10 +150,12 @@ export function PacketList({ packets, filters, selectedPacket, onSelectPacket }:
   return (
     <section className="flex h-full flex-col overflow-hidden">
       <div className="flex h-7 shrink-0 items-center justify-between border-b border-glass px-3 text-[10px] uppercase tracking-[0.15em] text-muted">
-        <span>Packet list</span>
-        <button className={follow ? "text-cyan-300" : "text-muted"} onClick={() => setFollow((value) => !value)}>
-          <ArrowDownToLine className="mr-1 inline" size={12} /> Follow
-        </button>
+        <span>{title}</span>
+        {showFollow && (
+          <button className={follow ? "text-cyan-300" : "text-muted"} onClick={() => setFollow((value) => !value)}>
+            <ArrowDownToLine className="mr-1 inline" size={12} /> Follow
+          </button>
+        )}
       </div>
       <div className="packet-header">
         {table.getFlatHeaders().map((header) => (

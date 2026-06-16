@@ -162,6 +162,30 @@ button:disabled {
   color: var(--text-muted);
 }
 
+.text-fluid-title {
+  font-size: clamp(11px, 1.35cqw, 14px);
+  line-height: 1.15;
+}
+
+.text-fluid-label {
+  font-size: clamp(7px, 0.9cqw, 9px);
+  line-height: 1.1;
+}
+
+.text-fluid-body {
+  font-size: clamp(9px, 1.05cqw, 11px);
+  line-height: 1.25;
+}
+
+.text-fluid-metric {
+  font-size: clamp(12px, 1.45cqw, 15px);
+  line-height: 1.1;
+}
+
+.container-inline {
+  container-type: inline-size;
+}
+
 .title-button {
   display: flex;
   width: 42px;
@@ -199,6 +223,14 @@ button:disabled {
 .nav-item:hover {
   color: white;
   background: var(--glass-hover);
+}
+
+.nav-item-compact {
+  width: 36px;
+  height: 36px;
+  justify-content: center;
+  gap: 0;
+  padding: 0;
 }
 
 .nav-item-active {
@@ -248,6 +280,76 @@ button:disabled {
 .button-danger:hover,
 .button-ghost:hover {
   filter: brightness(1.16);
+}
+
+.button-icon {
+  display: inline-flex;
+  width: 28px;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+  border: 0.5px solid var(--glass-border);
+  border-radius: 7px;
+  background: var(--glass-surface);
+  color: var(--text-primary);
+  transition: 150ms ease;
+}
+
+.button-icon:hover {
+  filter: brightness(1.16);
+}
+
+.button-icon-plain {
+  display: inline-flex;
+  width: 22px;
+  height: 22px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+}
+
+.button-icon-plain:hover {
+  color: var(--text-primary);
+}
+
+.resize-handle {
+  position: relative;
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+}
+
+.resize-handle > span {
+  display: none;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.resize-handle-x {
+  width: 10px;
+  cursor: col-resize;
+}
+
+.resize-handle-x > span {
+  width: 2px;
+  height: 36px;
+  max-height: 70%;
+}
+
+.resize-handle-y {
+  height: 16px;
+  cursor: row-resize;
+}
+
+.resize-handle-y > span {
+  width: 44px;
+  max-width: 70%;
+  height: 2px;
 }
 
 .glass-input {
@@ -374,6 +476,7 @@ button:disabled {
 }
 
 .alert-warning { color: #fde68a; border-color: rgba(245, 158, 11, 0.2); background: rgba(245, 158, 11, 0.08); }
+.alert-critical { color: #fecaca; border-color: rgba(239, 68, 68, 0.24); background: rgba(239, 68, 68, 0.10); }
 .alert-info { color: #bae6fd; border-color: rgba(14, 165, 233, 0.2); background: rgba(14, 165, 233, 0.08); }
 .alert-success { color: #bbf7d0; border-color: rgba(34, 197, 94, 0.2); background: rgba(34, 197, 94, 0.08); }
 

@@ -7,8 +7,15 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { listen } from "@tauri-apps/api/event";
-import type { Interface, Stats } from "@/lib/tauri";
+import {
+  onCaptureState,
+  onInterfaces,
+  onNetStats,
+  onPacket,
+  onSnifferError,
+  type Interface,
+  type Stats,
+} from "@/lib/tauri";
 import type { CaptureStats, Packet } from "@/types/packet";
 
 const MAX_PACKETS = 10_000;
@@ -50,10 +57,10 @@ export function CaptureProvider({ children }: { children: ReactNode }) {
     let cancelled = false;
 
     void Promise.all([
-      listen<Packet>("packet", ({ payload }) => {
-        setPackets((current) => [...current.slice(-(MAX_PACKETS - 1)), payload]);
+      onPacket((packet) => {
+        setPackets((current) => [...current.slice(-(MAX_PACKETS - 1)), packet]);
       }),
-      listen<Stats>("net_stats", ({ payload }) => {
+      onNetStats((payload: Stats) => {
         const next = {
           pps: payload.rate_pps,
           total: payload.captured,
@@ -62,11 +69,11 @@ export function CaptureProvider({ children }: { children: ReactNode }) {
         setStats(next);
         setStatsHistory((current) => [...current.slice(-(MAX_STATS_HISTORY - 1)), next]);
       }),
-      listen<Interface[]>("interfaces", ({ payload }) => setInterfaces(payload)),
-      listen<{ msg: string }>("sniffer_error", ({ payload }) => setError(payload.msg)),
-      listen<{ running: boolean }>("capture_state", ({ payload }) => {
-        setIsCapturing(payload.running);
-        if (!payload.running) setSessionId(null);
+      onInterfaces((payload: Interface[]) => setInterfaces(payload)),
+      onSnifferError((payload) => setError(payload.msg)),
+      onCaptureState((state) => {
+        setIsCapturing(state.running);
+        if (!state.running) setSessionId(null);
       }),
     ]).then((listeners) => {
       if (cancelled) {

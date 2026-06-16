@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Download, Filter, Play, Square, Trash2, X } from "lucide-react";
 import { FilterModal } from "@/components/FilterModal";
 import { usePacketCapture } from "@/hooks/usePacketCapture";
+import { interfaceCaptureName } from "@/lib/interfaces";
 import { setBpfFilter, startCapture, stopCapture } from "@/lib/tauri";
 import { countActiveFilters, useFiltersStore } from "@/store/filters";
 import type { Packet } from "@/types/packet";
@@ -31,7 +32,7 @@ export function Toolbar({ packets, filteredCount }: { packets: Packet[]; filtere
         );
         const sessionId = await startCapture({
           interfaceId: selected?.id ?? 0,
-          interfaceName: selected?.name ?? "interface-0",
+          interfaceName: interfaceCaptureName(selected),
           sessionName: `Capture ${new Date().toLocaleString()}`,
         });
         capture.setSessionId(sessionId);
@@ -137,7 +138,7 @@ export function Toolbar({ packets, filteredCount }: { packets: Packet[]; filtere
                 capture.isCapturing ? "bg-emerald-300" : "border border-white/35"
               }`}
             />
-            {capture.isCapturing ? `Capturing on ${selectedInterface?.name ?? "interface-0"}` : "Idle"}
+            {capture.isCapturing ? `Capturing on ${interfaceCaptureName(selectedInterface)}` : "Idle"}
           </span>
           {QUICK_FILTERS.map((filter) => (
             <button className="quick-chip" key={filter} onClick={() => void applyBpf(filter)}>
