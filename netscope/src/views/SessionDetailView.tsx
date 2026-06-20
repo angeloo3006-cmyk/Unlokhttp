@@ -44,7 +44,7 @@ export function SessionDetailView({ session, interfaces, onRefreshSessions, onDe
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [focusPanel, setFocusPanel] = useState<FocusPanel>(null);
-  const [packetExplorerMinimized, setPacketExplorerMinimized] = useState(false);
+  const [packetExplorerMinimized, setPacketExplorerMinimized] = useState(true);
   const [minimizedOverviewPanels, setMinimizedOverviewPanels] = useState<Record<OverviewPanel, boolean>>({
     time: false,
     protocol: false,
@@ -66,7 +66,7 @@ export function SessionDetailView({ session, interfaces, onRefreshSessions, onDe
     setSearch("");
     setSelectedPacket(null);
     setFocusPanel(null);
-    setPacketExplorerMinimized(false);
+    setPacketExplorerMinimized(true);
     setMinimizedOverviewPanels({ time: false, protocol: false, origins: false });
   }, [session?.id]);
 
@@ -260,7 +260,7 @@ export function SessionDetailView({ session, interfaces, onRefreshSessions, onDe
               />
             </Panel>
           ) : (
-            <Panel defaultSize="38px" minSize="38px" maxSize="38px">
+            <Panel defaultSize="42px" minSize="34px" maxSize="90px">
               <CollapsedPanelBar
                 label="Session packet explorer"
                 meta={`${packets.length}/${totalPackets}`}
@@ -569,29 +569,31 @@ function PacketExplorer({
 
   return (
     <div className="glass-panel flex h-full min-h-0 flex-col overflow-hidden">
-      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-glass p-3">
-        <div>
+      <div className="grid grid-cols-[minmax(150px,1fr)_minmax(220px,520px)_auto] items-center gap-3 border-b border-glass p-3">
+        <div className="min-w-0">
           <p className="text-[11px] uppercase tracking-[0.18em] text-muted">Session packet explorer</p>
           <p className="mt-1 text-[10px] text-secondary">
             {packets.length.toLocaleString()}/{totalPackets.toLocaleString()}
           </p>
         </div>
         <form
-          className="flex min-w-0 flex-1 justify-end gap-2"
+          className="min-w-0"
           onSubmit={(event) => {
             event.preventDefault();
             onPageChange(() => 1);
           }}
         >
-          <div className="relative min-w-[160px] max-w-[420px] flex-1">
-            <Search className="pointer-events-none absolute left-2 top-2 text-muted" size={13} />
+          <div className="relative mx-auto w-full">
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-muted" size={13} />
             <input
-              className="glass-input pl-7"
+              className="glass-input pl-8"
               placeholder="Search IP, protocol, MAC or vendor"
               value={search}
               onChange={(event) => onSearchChange(event.target.value)}
             />
           </div>
+        </form>
+        <div className="flex justify-end gap-1">
           <button className="button-icon-plain" type="button" onClick={onMinimize} title="Minimize packet explorer">
             <Minus size={13} />
           </button>
@@ -603,7 +605,7 @@ function PacketExplorer({
           >
             {isFocused ? <Minimize2 size={13} /> : <Maximize2 size={13} />}
           </button>
-        </form>
+        </div>
       </div>
 
       <div className="min-h-0 flex-1 overflow-hidden">

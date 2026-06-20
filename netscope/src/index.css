@@ -402,31 +402,45 @@ button:disabled {
   color: white;
 }
 
-.packet-header,
-.packet-row {
-  display: flex;
-  width: 100%;
-  align-items: center;
-  font-family: "Geist Mono", "JetBrains Mono", monospace;
-  font-size: 11px;
-}
 
 .packet-header {
-  position: sticky;
-  top: 0;
+  position: relative;
   z-index: 2;
+  display: flex;
+  flex-shrink: 0;
   height: 25px;
   border-bottom: 0.5px solid var(--glass-border);
-  background: rgba(255, 255, 255, 0.055);
+  background:
+    linear-gradient(180deg, rgba(28, 28, 32, 0.88), rgba(16, 16, 20, 0.82)),
+    rgba(255, 255, 255, 0.035);
+  backdrop-filter: blur(18px) saturate(1.45);
+  -webkit-backdrop-filter: blur(18px) saturate(1.45);
   color: var(--text-secondary);
+  font-family: "Geist Mono", "JetBrains Mono", Consolas, monospace;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 25px;
+  user-select: none;
 }
 
 .packet-row {
   position: absolute;
   left: 0;
+  display: flex;
   height: 22px;
+  margin: 0;
+  padding: 0;
+  border: 0;
   border-bottom: 0.5px solid rgba(255, 255, 255, 0.025);
+  background: transparent;
   color: rgba(255, 255, 255, 0.74);
+  cursor: default;
+  font-family: "Geist Mono", "JetBrains Mono", Consolas, monospace;
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 22px;
+  text-align: left;
+  appearance: none;
 }
 
 .packet-row:nth-child(even) {
@@ -443,8 +457,51 @@ button:disabled {
 
 .packet-cell {
   min-width: 0;
+  box-sizing: border-box;
   flex-shrink: 0;
   padding: 0 7px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.packet-header-cell {
+  position: relative;
+  display: inline-flex;
+  height: 100%;
+  align-items: center;
+  gap: 4px;
+}
+
+.packet-header-cell > button {
+  cursor: pointer;
+  color: inherit;
+}
+
+.packet-column-resizer {
+  position: absolute;
+  top: 4px;
+  right: 0;
+  width: 6px;
+  height: calc(100% - 8px);
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.packet-column-resizer::after {
+  position: absolute;
+  top: 0;
+  right: 2px;
+  width: 1px;
+  height: 100%;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  content: "";
+}
+
+.packet-column-resizer:hover::after,
+.packet-column-resizer-active::after {
+  background: rgba(255, 255, 255, 0.28);
 }
 
 .filtered-header {

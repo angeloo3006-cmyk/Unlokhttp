@@ -5,6 +5,7 @@ import { Sidebar, type AppView } from "@/components/Sidebar";
 import { CaptureView } from "@/views/CaptureView";
 import { DiagnosticsView } from "@/views/DiagnosticsView";
 import { SessionsView } from "@/views/SessionsView";
+import { SettingsView } from "@/views/SettingsView";
 import { usePacketCapture } from "@/hooks/usePacketCapture";
 
 export function Layout() {
@@ -47,16 +48,12 @@ export function Layout() {
             {view === "capture" && <CaptureView />}
             {view === "diagnostics" && <DiagnosticsView />}
             {view === "sessions" && <SessionsView />}
-            {view === "settings" && <Placeholder title="Settings" text="Capture preferences and sidecar configuration live here." />}
+            {view === "settings" && <SettingsView />}
           </main>
         </Panel>
       </Group>
     </div>
   );
-}
-
-function Placeholder({ title, text }: { title: string; text: string }) {
-  return <div className="glass-panel m-3 p-6"><h1 className="text-lg font-semibold">{title}</h1><p className="mt-2 text-sm text-secondary">{text}</p></div>;
 }
 
 function HorizontalResizeHandle() {
