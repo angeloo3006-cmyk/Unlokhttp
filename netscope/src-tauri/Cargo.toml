@@ -9,6 +9,10 @@ edition = "2021"
 name = "netscope_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[[bin]]
+name = "netscope-cli"
+path = "src/cli.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
